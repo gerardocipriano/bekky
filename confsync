@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+log()  { printf '>> %s\n' "$*" >&2; }
+die()  { printf 'ERRORE: %s\n' "$*" >&2; exit 1; }
+
+# Config locale (NON versionata): definisce CONFSYNC_BUCKET (e opz. CONFSYNC_HOST_TAG).
+# Vedi config.example. Tieni qui i dati di infrastruttura, fuori dal repo pubblico.
+CONFSYNC_CONFIG="${CONFSYNC_CONFIG:-$HOME/.config/confsync/config}"
+# shellcheck disable=SC1090
+[ -f "$CONFSYNC_CONFIG" ] && . "$CONFSYNC_CONFIG"
+
+BUCKET="${CONFSYNC_BUCKET:-}"
+HOSTNAME_TAG="${CONFSYNC_HOST_TAG:-$(hostname)}"
+
+require_bucket() {
+  [ -n "$BUCKET" ] || die "CONFSYNC_BUCKET non impostato (crea $CONFSYNC_CONFIG da config.example)"
+}
+
+# Source manifest (fallback embedded minimale se assente)
+if [ -f "$SCRIPT_DIR/lib/manifest.sh" ]; then
+  # shellcheck source=lib/manifest.sh
+  . "$SCRIPT_DIR/lib/manifest.sh"
+else
+  INCLUDE_DOTFILES=(.zshrc .bashrc .profile .config .claude CLAUDE.md .gitconfig)
+  # shellcheck disable=SC2034
+  EXCLUDE_PATTERNS=('*/Cache/*' '*.log' '*/.git/*' '*/node_modules/*')
+  SECRET_PATHS=(.ssh .gnupg .netrc)
+  SECRET_PATTERNS=('.env' '*.key' '*.pem' '*secret*' '*token*')
+  REPO_SCAN_DIRS=("$HOME/code")
+fi
+
+detect_distro() {
+  local f="${CONFSYNC_OS_RELEASE:-/etc/os-release}"
+  local id="" idlike=""
+  if [ -r "$f" ]; then
+    # shellcheck disable=SC1090
+    id="$(. "$f" 2>/dev/null; printf '%s' "${ID:-}")"
+    # shellcheck disable=SC1090
+    idlike="$(. "$f" 2>/dev/null; printf '%s' "${ID_LIKE:-}")"
+  fi
+  case "$id $idlike" in
+    *arch*)   echo arch ;;
+    *debian*|*ubuntu*) echo debian ;;
+    *fedora*|*rhel*)   echo fedora ;;
+    *) echo unknown ;;
+  esac
+}
+
+pkg_list_cmd() {
+  case "$(detect_distro)" in
+    arch)   echo "pacman -Qqe" ;;
+    debian) echo "apt-mark showmanual" ;;
+    fedora) echo "dnf repoquery --userinstalled --queryformat '%{name}'" ;;
+    *)      echo "" ;;
+  esac
+}
+
+require_deps() {
+  local missing=()
+  for d in tar openssl gsutil; do
+    if [ "${CONFSYNC_FAKE_MISSING:-}" = "$d" ] || ! command -v "$d" >/dev/null 2>&1; then
+      missing+=("$d")
+    fi
+  done
+  [ ${#missing[@]} -eq 0 ] || die "dipendenze mancanti: ${missing[*]} (installa: openssl, zstd, google-cloud-sdk)"
+}
+
+_comp_cmd()   { if command -v zstd >/dev/null 2>&1; then echo "zstd -${CONFSYNC_ZSTD_LEVEL:-10} -T0"; else echo "gzip -6"; fi; }
+_decomp_cmd() { if command -v zstd >/dev/null 2>&1; then echo "zstd -d"; else echo "gzip -d"; fi; }
+
+# tar che scrive l'archivio su stdout tollerando exit 1 (file cambiati/illeggibili
+# durante la lettura: warning, non errore fatale). Exit >=2 resta fatale.
+_tar_stream() {
+  tar "$@"; local ec=$?
+  [ "$ec" -le 1 ] && return 0 || return "$ec"
+}
+
+get_passphrase() {
+  if [ -n "${CONFSYNC_PASSPHRASE:-}" ]; then printf '%s' "$CONFSYNC_PASSPHRASE"; return 0; fi
+  local p; read -rsp "Passphrase confsync: " p >&2; printf '\n' >&2; printf '%s' "$p"
+}
+
+sha256_of() { sha256sum "$1" | awk '{print $1}'; }
+
+pack_encrypt() {
+  local src="$1" out="$2"; shift 2
+  local pass; pass="$(get_passphrase)"
+  local existing=(); local p
+  for p in "$@"; do [ -e "$src/$p" ] && existing+=("$p"); done
+  [ ${#existing[@]} -gt 0 ] || { log "nessun path da archiviare per $out"; return 0; }
+  # tar normalizzato (deterministico: ordine+mtime+owner fissi) così lo stream è
+  # identico run-to-run a contenuto invariato. Lo SHA del contenuto compresso è
+  # calcolato PRIMA della cifratura (openssl usa salt casuale -> i .enc non sono
+  # confrontabili) in una passata dedicata, e salvato in sidecar .contentsha per il dedup.
+  local tar_opts=(--sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner
+                  --warning=no-file-changed --ignore-failed-read)
+  local ex; for ex in "${EXCLUDE_PATTERNS[@]}"; do tar_opts+=(--exclude="$ex"); done
+  _tar_stream "${tar_opts[@]}" -C "$src" -cf - "${existing[@]}" \
+    | eval "$(_comp_cmd)" \
+    | openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -pass fd:3 -out "$out" 3<<<"$pass"
+  _tar_stream "${tar_opts[@]}" -C "$src" -cf - "${existing[@]}" \
+    | eval "$(_comp_cmd)" | sha256sum | awk '{print $1}' > "$out.contentsha"
+}
+
+decrypt_unpack() {
+  local in="$1" dest="$2"
+  local pass; pass="$(get_passphrase)"
+  mkdir -p "$dest"
+  openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass fd:3 -in "$in" 3<<<"$pass" \
+    | eval "$(_decomp_cmd)" \
+    | tar -C "$dest" -xf -
+}
+
+is_secret_path() {
+  local rel="$1" pat
+  for pat in "${SECRET_PATTERNS[@]}"; do
+    # shellcheck disable=SC2053,SC2254
+    case "$(basename "$rel")" in $pat) return 0 ;; esac
+    # shellcheck disable=SC2254
+    case "$rel" in $pat) return 0 ;; esac
+  done
+  return 1
+}
+
+list_repo_untracked() {
+  git -C "$1" ls-files --others --exclude-standard 2>/dev/null || true
+}
+
+collect_repos() {
+  local out="$1"; local first=1
+  { printf '['
+    local d repo remote branch
+    for d in "${REPO_SCAN_DIRS[@]}"; do
+      [ -d "$d" ] || continue
+      while IFS= read -r -d '' gitdir; do
+        repo="$(dirname "$gitdir")"
+        remote="$(git -C "$repo" remote get-url origin 2>/dev/null || echo "")"
+        branch="$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+        [ $first -eq 1 ] || printf ','
+        first=0
+        printf '{"path":"%s","remote":"%s","branch":"%s"}' \
+          "$repo" "$remote" "$branch"
+      done < <(find "$d" -type d -name .git -prune -print0 2>/dev/null)
+    done
+    printf ']'
+  } > "$out"
+}
+
+GSUTIL() { "${CONFSYNC_GSUTIL:-gsutil}" "$@"; }
+
+gcs_latest_sha() {
+  local ts; ts="$(GSUTIL cat "$BUCKET/$HOSTNAME_TAG/latest" 2>/dev/null || true)"
+  [ -n "$ts" ] || { echo ""; return 0; }
+  GSUTIL cat "$BUCKET/$HOSTNAME_TAG/$ts/BUNDLE.sha" 2>/dev/null || echo ""
+}
+
+gcs_upload() {
+  local dir="$1" ts="$2"
+  GSUTIL -m cp -r "$dir"/* "$BUCKET/$HOSTNAME_TAG/$ts/" >/dev/null
+  printf '%s' "$ts" | GSUTIL cp - "$BUCKET/$HOSTNAME_TAG/latest" >/dev/null
+}
+
+gcs_fetch_latest() {
+  local dest="$1"; mkdir -p "$dest"
+  local ts; ts="$(GSUTIL cat "$BUCKET/$HOSTNAME_TAG/latest" 2>/dev/null || true)"
+  [ -n "$ts" ] || die "nessun backup trovato per host $HOSTNAME_TAG"
+  GSUTIL -m cp -r "$BUCKET/$HOSTNAME_TAG/$ts/*" "$dest"/ >/dev/null 2>&1 \
+    || die "download del backup $ts fallito"
+  [ -f "$dest/MANIFEST.txt" ] || die "download incompleto: MANIFEST.txt assente"
+  echo "$ts"
+}
+
+verify_manifest() {
+  local dir="$1"
+  [ -f "$dir/MANIFEST.txt" ] || die "MANIFEST.txt assente: backup corrotto"
+  local sha f
+  while read -r sha f; do
+    [ -f "$dir/$f" ] || die "file mancante nel download: $f (restore parziale/corrotto)"
+    [ "$(sha256_of "$dir/$f")" = "$sha" ] || die "checksum non valido per $f"
+  done < "$dir/MANIFEST.txt"
+}
+
+cmd_backup() {
+  require_deps; require_bucket
+  local ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  local work; work="${CONFSYNC_WORKDIR_KEEP:-$(mktemp -d)}"; mkdir -p "$work"
+  # shellcheck disable=SC2064  # espansione immediata voluta: $work fuori scope all'EXIT
+  [ -n "${CONFSYNC_WORKDIR_KEEP:-}" ] || trap "rm -rf '$work'" EXIT
+
+  log "raccolgo dotfiles"
+  pack_encrypt "$HOME" "$work/dotfiles.tar.enc" "${INCLUDE_DOTFILES[@]}"
+
+  log "raccolgo secrets"
+  local secstage="$work/.sec"; mkdir -p "$secstage"
+  local p
+  for p in "${SECRET_PATHS[@]}"; do
+    [ -e "$HOME/$p" ] && { mkdir -p "$secstage/$(dirname "$p")"; cp -a "$HOME/$p" "$secstage/$p"; }
+  done
+
+  log "scansiono repo"
+  collect_repos "$work/repos.manifest.json"
+  local localstage="$work/.local"; mkdir -p "$localstage"
+  local repo rel base
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      base="${repo#"$HOME"/}"
+      if is_secret_path "$rel"; then
+        mkdir -p "$secstage/$base/$(dirname "$rel")"
+        cp -a "$repo/$rel" "$secstage/$base/$rel" 2>/dev/null || true
+      else
+        mkdir -p "$localstage/$base/$(dirname "$rel")"
+        cp -a "$repo/$rel" "$localstage/$base/$rel" 2>/dev/null || true
+      fi
+    done < <(list_repo_untracked "$repo")
+  done < <(grep -o '"path":"[^"]*"' "$work/repos.manifest.json" | sed 's/"path":"//;s/"$//')
+
+  pack_encrypt "$secstage"   "$work/secrets.tar.enc"          .
+  pack_encrypt "$localstage" "$work/repo-localfiles.tar.enc"  .
+  rm -rf "$secstage" "$localstage"
+
+  log "lista pacchetti"
+  local plc; plc="$(pkg_list_cmd)"
+  if [ -n "$plc" ]; then eval "$plc" > "$work/packages.txt" 2>/dev/null || true; fi
+  command -v flatpak >/dev/null 2>&1 && \
+    flatpak list --app --columns=application >> "$work/packages.txt" 2>/dev/null || true
+
+  log "manifest + checksum"
+  # MANIFEST.txt: sha dei file CIFRATI caricati (integrità del download/restore)
+  ( cd "$work" && for f in *.tar.enc repos.manifest.json packages.txt; do
+      [ -f "$f" ] && printf '%s  %s\n' "$(sha256sum "$f" | awk '{print $1}')" "$f"
+    done ) > "$work/MANIFEST.txt"
+  # BUNDLE.sha: firma del CONTENUTO (pre-cifratura) per il dedup — i .contentsha
+  # sono deterministici, i .enc no (salt casuale). Include anche i file in chiaro.
+  ( cd "$work"
+    cat ./*.contentsha 2>/dev/null
+    [ -f repos.manifest.json ] && sha256sum repos.manifest.json | awk '{print $1}'
+    [ -f packages.txt ]        && sha256sum packages.txt        | awk '{print $1}'
+  ) | sort | sha256sum | awk '{print $1}' > "$work/BUNDLE.sha"
+  rm -f "$work"/*.contentsha
+
+  local newsha oldsha; newsha="$(cat "$work/BUNDLE.sha")"; oldsha="$(gcs_latest_sha)"
+  if [ "$newsha" = "$oldsha" ] && [ -n "$oldsha" ]; then
+    log "nessuna modifica dall'ultimo backup — skip upload (dedup)"
+    return 0
+  fi
+  log "upload -> $BUCKET/$HOSTNAME_TAG/$ts/"
+  gcs_upload "$work" "$ts"
+  log "backup completato: $ts"
+}
+
+cmd_restore() {
+  require_deps; require_bucket
+  local do_secrets=0 do_repos=0 do_pkgs=0 dryrun=0 assume_yes=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --secrets) do_secrets=1 ;; --repos) do_repos=1 ;; --packages) do_pkgs=1 ;;
+    --dry-run) dryrun=1 ;; --yes) assume_yes=1 ;; *) die "flag sconosciuta: $1" ;;
+  esac; shift; done
+
+  local work; work="$(mktemp -d)"
+
+  # shellcheck disable=SC2064  # espansione immediata voluta: $work fuori scope all'EXIT
+
+  trap "rm -rf '$work'" EXIT
+  local ts; ts="$(gcs_fetch_latest "$work")"
+  log "ripristino backup $ts"
+  verify_manifest "$work"
+
+  if [ $dryrun -eq 1 ]; then
+    log "[dry-run] estrarrei dotfiles in $HOME; artefatti: $(ls "$work")"; return 0
+  fi
+  if [ $assume_yes -eq 0 ]; then
+    read -rp "Sovrascrivo i dotfiles in $HOME? [y/N] " a; [ "$a" = y ] || die "annullato"
+  fi
+  [ -f "$work/dotfiles.tar.enc" ] && decrypt_unpack "$work/dotfiles.tar.enc" "$HOME"
+  log "dotfiles ripristinati"
+
+  if [ $do_secrets -eq 1 ] && [ -f "$work/secrets.tar.enc" ]; then
+    decrypt_unpack "$work/secrets.tar.enc" "$HOME"
+    chmod -R go-rwx "$HOME/.ssh" "$HOME/.gnupg" 2>/dev/null || true
+    log "secrets ripristinati (permessi 600)"
+  fi
+
+  if [ $do_repos -eq 1 ] && [ -f "$work/repos.manifest.json" ]; then
+    local entry path remote branch
+    grep -o '{[^}]*}' "$work/repos.manifest.json" | while read -r entry; do
+      path="$(echo "$entry"  | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')"
+      remote="$(echo "$entry"| sed -n 's/.*"remote":"\([^"]*\)".*/\1/p')"
+      branch="$(echo "$entry"| sed -n 's/.*"branch":"\([^"]*\)".*/\1/p')"
+      [ -n "$remote" ] || { log "skip $path (no remote)"; continue; }
+      if [ ! -d "$path/.git" ]; then
+        mkdir -p "$(dirname "$path")"
+        if git clone "$remote" "$path"; then
+          [ -n "$branch" ] && git -C "$path" checkout "$branch" 2>/dev/null || true
+        else
+          log "clone fallito: $path ($remote)"
+        fi
+      fi
+    done
+    [ -f "$work/repo-localfiles.tar.enc" ] && decrypt_unpack "$work/repo-localfiles.tar.enc" "$HOME"
+    log "repo ripristinate"
+  fi
+
+  if [ $do_pkgs -eq 1 ] && [ -f "$work/packages.txt" ]; then
+    local distro; distro="$(detect_distro)"
+    local inst; case "$distro" in
+      arch) inst="sudo pacman -S --needed - <" ;;
+      debian) inst="sudo xargs apt-get install -y <" ;;
+      fedora) inst="sudo xargs dnf install -y <" ;;
+      *) inst="" ;;
+    esac
+    log "pacchetti da reinstallare (distro: $distro). Comando suggerito:"
+    printf '  %s packages.txt\n' "${inst:-<manuale>}" >&2
+    log "(esecuzione manuale per sicurezza)"
+  fi
+  log "restore completato"
+}
+
+cmd_list() {
+  require_deps; require_bucket
+  GSUTIL ls "$BUCKET/$HOSTNAME_TAG/" 2>/dev/null || die "nessun backup"
+}
+
+cmd_diff() {
+  require_deps; require_bucket
+  local work; work="$(mktemp -d)"
+  # shellcheck disable=SC2064  # espansione immediata voluta: $work fuori scope all'EXIT
+  trap "rm -rf '$work'" EXIT
+  gcs_fetch_latest "$work" >/dev/null
+  local ext="$work/ext"; mkdir -p "$ext"
+  [ -f "$work/dotfiles.tar.enc" ] && decrypt_unpack "$work/dotfiles.tar.enc" "$ext"
+  log "differenze dotfiles (backup vs locale):"
+  ( cd "$ext" && find . -type f | while read -r f; do
+      diff -q "$f" "$HOME/${f#./}" >/dev/null 2>&1 || echo "DIVERSO: ${f#./}"
+    done ) >&2 || true
+}
+
+usage() { cat >&2 <<EOF
+confsync — backup/restore cifrato delle config OS
+  confsync backup
+  confsync restore [--secrets] [--repos] [--packages] [--dry-run]
+  confsync list
+  confsync diff
+EOF
+}
+
+main() {
+  case "${1:-}" in
+    --source-only) return 0 ;;
+    backup)  shift; cmd_backup "$@" ;;
+    restore) shift; cmd_restore "$@" ;;
+    list)    shift; cmd_list "$@" ;;
+    diff)    shift; cmd_diff "$@" ;;
+    ""|-h|--help) usage ;;
+    *) die "comando sconosciuto: $1 (usa: backup|restore|list|diff)" ;;
+  esac
+}
+
+main "$@"
