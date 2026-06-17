@@ -1,0 +1,7 @@
+# Copia in ~/.config/confsync/config (chmod 600) e personalizza.
+# Questo file NON contiene dati reali ed e' l'unico versionato.
+export CONFSYNC_BUCKET="gs://il-tuo-bucket"          # bucket GCS di destinazione
+export CONFSYNC_PROJECT="il-tuo-progetto-gcp"        # solo per scripts/create-bucket.sh
+export CONFSYNC_ACCOUNT="tua.email@example.com"      # account gcloud (opzionale)
+# export CONFSYNC_HOST_TAG="$(hostname)"             # tag host nel bucket (default: hostname)
+# export CONFSYNC_ZSTD_LEVEL=10                       # livello compressione zstd

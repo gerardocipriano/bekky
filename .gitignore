@@ -1,0 +1,11 @@
+# archivi/artefatti di backup — mai versionare
+*.tar.enc
+*.tar.age
+*.tar.zst
+*.contentsha
+*.tmp
+.confsync-test/
+
+# config locale con dati di infrastruttura — vedi config.example
+config
+last-run.log
