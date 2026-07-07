@@ -5,6 +5,9 @@ INCLUDE_DOTFILES=(
   .zshrc .bashrc .profile .zprofile .aliases
   .config .CLAUDE.md CLAUDE.md .claude
   .gitconfig .tmux.conf .vimrc
+  # History e personalizzazioni shell: preziose quanto le config
+  .zsh_history .zhistory .bash_history
+  .oh-my-zsh/custom
 )
 # Pattern esclusi (glob su path tar), per evitare cache/spazzatura voluminosa.
 # Tengono il backup piccolo e veloce: cache browser/VSCode, log, crash dump, ecc.
