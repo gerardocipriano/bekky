@@ -80,6 +80,12 @@ _tar_stream() {
 
 get_passphrase() {
   if [ -n "${CONFSYNC_PASSPHRASE:-}" ]; then printf '%s' "$CONFSYNC_PASSPHRASE"; return 0; fi
+  # fallback: 1Password CLI (item "bekky passphrase") — utile su macchina nuova
+  # dove esiste solo 1Password; l'app chiede conferma biometrica/master password
+  local op_ref="${CONFSYNC_OP_REF:-op://Personal/bekky passphrase/password}"
+  if command -v op >/dev/null; then
+    local p; p="$(op read "$op_ref" 2>/dev/null)" && [ -n "$p" ] && { printf '%s' "$p"; return 0; }
+  fi
   local p; read -rsp "Passphrase confsync: " p >&2; printf '\n' >&2; printf '%s' "$p"
 }
 
@@ -126,7 +132,12 @@ is_secret_path() {
 }
 
 list_repo_untracked() {
-  git -C "$1" ls-files --others --exclude-standard 2>/dev/null || true
+  {
+    git -C "$1" ls-files --others --exclude-standard 2>/dev/null || true
+    # CLAUDE.md e .claude/ sono spesso gitignored ma contengono configurazione
+    # di valore non ricostruibile: vanno nel backup anche se ignorati.
+    git -C "$1" ls-files --others --ignored --exclude-standard -- CLAUDE.md .claude 2>/dev/null || true
+  } | sort -u
 }
 
 collect_repos() {
@@ -149,7 +160,15 @@ collect_repos() {
   } > "$out"
 }
 
-GSUTIL() { "${CONFSYNC_GSUTIL:-gsutil}" "$@"; }
+# Forza l'account definito in config: l'account gcloud "attivo" sulla macchina
+# cambia durante il lavoro (clienti diversi) e non deve influenzare il backup.
+GSUTIL() {
+  if [ -n "${CONFSYNC_ACCOUNT:-}" ]; then
+    CLOUDSDK_CORE_ACCOUNT="$CONFSYNC_ACCOUNT" "${CONFSYNC_GSUTIL:-gsutil}" "$@"
+  else
+    "${CONFSYNC_GSUTIL:-gsutil}" "$@"
+  fi
+}
 
 gcs_latest_sha() {
   local ts; ts="$(GSUTIL cat "$BUCKET/$HOSTNAME_TAG/latest" 2>/dev/null || true)"
