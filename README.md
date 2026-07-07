@@ -116,7 +116,14 @@ cd ~/code/misc/bekky
 ./confsync restore                 # dotfiles
 ./confsync restore --secrets       # chiavi
 ./confsync restore --repos         # tutte le tue repo, dove stavano
+./confsync restore --packages      # reinstalla i pacchetti espliciti
+
+./scripts/post-restore.sh          # passi di sistema fuori da $HOME
 ```
+
+`post-restore.sh` copre ciò che il backup non può: abilita `paccache.timer`
+(pulizia cache pacman), disabilita baloo, reinstalla il cron di bekky e
+ricorda i login gcloud. Idempotente.
 
 > 🔑 **La passphrase è l'unica cosa che bekky non può recuperare per te.** Custodiscila nel tuo
 > password manager: senza, i backup sono — *by design* — irrecuperabili.
