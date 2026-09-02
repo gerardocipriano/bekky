@@ -17,6 +17,8 @@ EXCLUDE_PATTERNS=(
   '*/Service Worker/CacheStorage/*' '*/Service Worker/ScriptCache/*'
   '*/blob_storage/*' '*/Crashpad/*' '*/component_crx_cache/*' '*/GrShaderCache/*'
   '*.log' '*/logs/*' '*/.git/*' '*/node_modules/*' '*.sock' '*.lock'
+  # Stato runtime di Claude Code: marker e offset ricreati a ogni sessione.
+  '.claude/.telegram-pending/*' '.claude/.telegram-offset'
 )
 # App pesanti: stato/cache voluminoso e non portabile (no customizzazioni utili).
 # Escluse per tenere il backup piccolo/economico (vedi requisito costo minimo).
@@ -34,7 +36,7 @@ EXCLUDE_PATTERNS+=(
 )
 # Path sensibili -> secrets.tar.enc (relativi a $HOME)
 SECRET_PATHS=(
-  .ssh .gnupg .netrc
+  .ssh .gnupg .netrc .secrets
   .config/gcloud/credentials.db .config/gcloud/legacy_credentials
 )
 # Pattern che marcano un file come sensibile (usati anche nelle repo)
