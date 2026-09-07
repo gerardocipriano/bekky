@@ -8,8 +8,9 @@ DIR="$HOME/code/misc/bekky"
 PASS_FILE="$HOME/.config/confsync/passphrase"
 LOG="$HOME/.config/confsync/last-run.log"
 
-# Ambiente per uso da cron (PATH ridotto)
-export PATH="$HOME/google-cloud-sdk/bin:/usr/local/bin:/usr/bin:/bin"
+# Ambiente per uso da cron (PATH ridotto). L'SDK sta in $HOME se installato da
+# tarball, in /usr/bin se dal pacchetto della distro: teniamo entrambi.
+export PATH="$HOME/google-cloud-sdk/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin"
 export CLOUDSDK_CONFIG="$HOME/.config/gcloud"
 
 notify_fail() {

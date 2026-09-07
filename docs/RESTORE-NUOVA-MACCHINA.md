@@ -1,4 +1,4 @@
-# Ripristino su macchina nuova (es. portatile Fedora)
+# Ripristino su macchina nuova (es. portatile Ubuntu)
 
 Prerequisiti da procurarsi PRIMA (non stanno nel backup):
 1. **Passphrase confsync** (senza, gli archivi `.enc` sono irrecuperabili — tienila in un password manager)
@@ -7,8 +7,10 @@ Prerequisiti da procurarsi PRIMA (non stanno nel backup):
 ## Procedura
 
 ```bash
-# 1. Dipendenze (Fedora)
-sudo dnf install -y git openssl zstd google-cloud-cli
+# 1. Dipendenze (Ubuntu). zstd non è opzionale: gli archivi sono compressi con quello.
+sudo apt-get update && sudo apt-get install -y git openssl zstd cron
+# google-cloud-cli: repo apt di Google (il pacchetto Ubuntu non esiste)
+# https://cloud.google.com/sdk/docs/install#deb
 
 # 2. Login gcloud con l'account personale
 gcloud auth login gerardo.cipriano@dinova.one
@@ -35,7 +37,11 @@ cd ~/code/misc/bekky
 
 Cosa ottieni: dotfiles (zsh/bash + history, .config filtrato, `.claude` completo, CLAUDE.md), secrets (.ssh/.gnupg/creds gcloud, permessi 600), repo di `~/code` ri-clonate + file locali non tracciati (inclusi CLAUDE.md/.claude gitignored).
 
-Note Fedora:
-- `packages.txt` viene dal vecchio sistema (Arch/pacman): i nomi non mappano 1:1 su dnf — il restore stampa la lista e lascia l'installazione manuale, com'è giusto.
+Dopo il restore lancia `./scripts/post-restore.sh`: installa il cron settimanale e stampa i passi manuali rimanenti.
+
+Note Ubuntu:
+- `packages.txt` viene dal vecchio sistema (Arch/pacman): i nomi non mappano 1:1 su apt. Il restore rileva la differenza di distro e avvisa — trattala come lista di riferimento per un triage manuale, **non** passarla in blocco ad `apt-get install`, che morirebbe al primo pacchetto inesistente.
+- Le config KDE Plasma (i file `k*rc` in `~/.config`) vengono ripristinate ma su GNOME sono inerti: si possono ignorare.
+- I binari precompilati (uv, rclone, magika, iii, rtk, deno) sono esclusi dal backup perché legati alla glibc della macchina di origine: vanno riscaricati.
 - Dopo il restore: `chsh -s $(which zsh)`, riapri la shell, verifica `gcloud auth list`.
 - Rimuovi/aggiorna `CONFSYNC_HOST_TAG` quando vuoi che il nuovo host inizi a fare i PROPRI backup con il suo hostname.

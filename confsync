@@ -60,7 +60,7 @@ pkg_list_cmd() {
 
 require_deps() {
   local missing=()
-  for d in tar openssl gsutil; do
+  for d in tar openssl gsutil zstd; do
     if [ "${CONFSYNC_FAKE_MISSING:-}" = "$d" ] || ! command -v "$d" >/dev/null 2>&1; then
       missing+=("$d")
     fi
@@ -68,8 +68,8 @@ require_deps() {
   [ ${#missing[@]} -eq 0 ] || die "dipendenze mancanti: ${missing[*]} (installa: openssl, zstd, google-cloud-sdk)"
 }
 
-_comp_cmd()   { if command -v zstd >/dev/null 2>&1; then echo "zstd -${CONFSYNC_ZSTD_LEVEL:-10} -T0"; else echo "gzip -6"; fi; }
-_decomp_cmd() { if command -v zstd >/dev/null 2>&1; then echo "zstd -d"; else echo "gzip -d"; fi; }
+_comp_cmd()   { echo "zstd -${CONFSYNC_ZSTD_LEVEL:-10} -T0"; }
+_decomp_cmd() { echo "zstd -d"; }
 
 # tar che scrive l'archivio su stdout tollerando exit 1 (file cambiati/illeggibili
 # durante la lettura: warning, non errore fatale). Exit >=2 resta fatale.
@@ -245,12 +245,15 @@ cmd_backup() {
   log "lista pacchetti"
   local plc; plc="$(pkg_list_cmd)"
   if [ -n "$plc" ]; then eval "$plc" > "$work/packages.txt" 2>/dev/null || true; fi
+  # La distro di origine serve al restore per capire se i nomi dei pacchetti
+  # sono utilizzabili o solo indicativi (migrazione tra distro diverse).
+  detect_distro > "$work/packages.distro"
   command -v flatpak >/dev/null 2>&1 && \
     flatpak list --app --columns=application >> "$work/packages.txt" 2>/dev/null || true
 
   log "manifest + checksum"
   # MANIFEST.txt: sha dei file CIFRATI caricati (integrità del download/restore)
-  ( cd "$work" && for f in *.tar.enc repos.manifest.json packages.txt; do
+  ( cd "$work" && for f in *.tar.enc repos.manifest.json packages.txt packages.distro; do
       [ -f "$f" ] && printf '%s  %s\n' "$(sha256sum "$f" | awk '{print $1}')" "$f"
     done ) > "$work/MANIFEST.txt"
   # BUNDLE.sha: firma del CONTENUTO (pre-cifratura) per il dedup — i .contentsha
@@ -335,6 +338,12 @@ cmd_restore() {
     log "pacchetti da reinstallare (distro: $distro). Comando suggerito:"
     printf '  %s packages.txt\n' "${inst:-<manuale>}" >&2
     log "(esecuzione manuale per sicurezza)"
+    # packages.txt porta i nomi della distro di ORIGINE: se non coincide con
+    # questa, l'install in blocco muore al primo pacchetto inesistente.
+    if [ -f "$work/packages.distro" ] && [ "$(cat "$work/packages.distro")" != "$distro" ]; then
+      log "ATTENZIONE: lista generata su '$(cat "$work/packages.distro")', qui sei su '$distro':"
+      log "i nomi non mappano 1:1, trattala come riferimento per un triage manuale"
+    fi
   fi
   log "restore completato"
 }
