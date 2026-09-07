@@ -34,21 +34,45 @@ fi
 
 # 3. cron settimanale di bekky (crontab non è in $HOME)
 CRON_LINE="0 13 * * 3 $HOME/code/misc/bekky/scripts/bekky-cron.sh"
-if crontab -l 2>/dev/null | grep -qF "bekky-cron.sh"; then
+if ! command -v crontab >/dev/null; then
+  skip "crontab assente: installa il pacchetto cron, poi rilancia questo script"
+elif crontab -l 2>/dev/null | grep -qF "bekky-cron.sh"; then
   skip "cron bekky già presente"
 else
   ( crontab -l 2>/dev/null; echo "$CRON_LINE" ) | crontab - \
     && ok "cron bekky installato (mercoledì 13:00)"
 fi
 
-# 4. promemoria manuali
-cat <<'EOF'
+# 4. unit utente ripristinate che puntano a eseguibili inesistenti. Capita per
+#    venv Python, toolchain nvm e binari esclusi dal backup: systemd le carica
+#    e poi falliscono a ogni avvio, in silenzio.
+UNITDIR="$HOME/.config/systemd/user"
+if [ -d "$UNITDIR" ]; then
+  broken=0
+  while read -r exe; do
+    [ -n "$exe" ] || continue
+    [ -x "${exe/#\%h/$HOME}" ] || { printf '  \033[33m!\033[0m ExecStart mancante: %s\n' "$exe"; broken=$((broken+1)); }
+  done < <(grep -h '^ExecStart=' "$UNITDIR"/*.service 2>/dev/null | sed 's/^ExecStart=//' | awk '{print $1}' | sort -u)
+  [ "$broken" -eq 0 ] && ok "unit utente: tutti gli ExecStart risolvibili" \
+    || skip "$broken eseguibili da ricreare (venv, nvm, binari non backuppati) prima di abilitare le unit"
+fi
+
+# 5. promemoria manuali
+if command -v apt-get >/dev/null; then
+  ONEPW="scaricare il .deb da 1password.com e aggiungere il repo apt"
+else
+  ONEPW="yay -S 1password 1password-cli"
+fi
+cat <<EOF
 
 Passi manuali rimanenti:
-  - 1Password: installare app + CLI (`yay -S 1password 1password-cli`), attivare
-    in Settings → Developer sia "Integrate with CLI" sia "Use the SSH agent";
-    le chiavi SSH e la passphrase bekky sono nel vault
-  - gcloud: `gcloud auth login` per ogni account (le config dei profili sono
+  - 1Password: installare app + CLI ($ONEPW), attivare in Settings → Developer
+    sia "Integrate with CLI" sia "Use the SSH agent"; le chiavi SSH e la
+    passphrase bekky sono nel vault
+  - gcloud: \`gcloud auth login\` per ogni account (le config dei profili sono
     già ripristinate in ~/.config/gcloud, mancano solo i token)
+  - binari esclusi dal backup, da riscaricare: uv, rclone, magika, iii, rtk, deno
+  - packages.txt viene da un'altra distro: usalo come lista di riferimento per
+    un triage manuale, non passarlo in blocco al package manager
   - passphrase bekky: verificare ~/.config/confsync/passphrase (chmod 600)
 EOF

@@ -8,6 +8,11 @@ INCLUDE_DOTFILES=(
   # History e personalizzazioni shell: preziose quanto le config
   .zsh_history .zhistory .bash_history
   .oh-my-zsh/custom
+  # Eseguibili utente: le unit in .config/systemd/user e gli alias di .zshrc
+  # li invocano per path assoluto, quindi senza questi il restore lascia
+  # servizi e alias rotti.
+  .local/bin bin
+  .local/share/applications
 )
 # Pattern esclusi (glob su path tar), per evitare cache/spazzatura voluminosa.
 # Tengono il backup piccolo e veloce: cache browser/VSCode, log, crash dump, ecc.
@@ -33,6 +38,13 @@ EXCLUDE_PATTERNS+=(
 EXCLUDE_PATTERNS+=(
   '.config/gcloud/credentials.db' '.config/gcloud/access_tokens.db'
   '.config/gcloud/legacy_credentials' '.config/gcloud/logs'
+)
+# Binari precompilati in .local/bin e bin: pesano ~175M e sono linkati contro
+# la glibc di questa macchina, quindi non sopravvivono a una distro con glibc
+# più vecchia. Si riscaricano; gli script accanto a loro invece si backuppano.
+EXCLUDE_PATTERNS+=(
+  '.local/bin/uv' '.local/bin/uvx' '.local/bin/magika' '.local/bin/iii'
+  '.local/bin/rtk' '.local/bin/deno' '.local/bin/__pycache__' 'bin/rclone'
 )
 # Path sensibili -> secrets.tar.enc (relativi a $HOME)
 SECRET_PATHS=(
