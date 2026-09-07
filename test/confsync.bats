@@ -87,3 +87,23 @@ setup() { setup_confsync; }
   [ "$status" -eq 0 ]
   [ "$(cat "$newhome/.zshrc")" = "alias x=y" ]
 }
+
+@test "backup registra la distro di origine e restore avverte se non coincide" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"; mkdir -p "$fakehome"
+  echo "alias x=y" > "$fakehome/.zshrc"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  srcosr="$tmp/os-release.src"; printf 'ID=arch\n' > "$srcosr"
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" CONFSYNC_OS_RELEASE="$srcosr" \
+      CONFSYNC_WORKDIR_KEEP="$tmp/work" bash "$CONFSYNC" backup
+  [ "$(cat "$tmp/work/packages.distro")" = "arch" ]
+  # restore su una distro diversa da quella che ha prodotto il backup
+  newhome="$tmp/new"; mkdir -p "$newhome"
+  osr="$tmp/os-release"; printf 'ID=ubuntu\nID_LIKE=debian\n' > "$osr"
+  run env HOME="$newhome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" CONFSYNC_OS_RELEASE="$osr" \
+      bash "$CONFSYNC" restore --yes --packages
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ATTENZIONE"* ]]
+}
