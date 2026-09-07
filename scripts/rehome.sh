@@ -1,27 +1,37 @@
 #!/usr/bin/env bash
 # Riscrive i path assoluti del vecchio $HOME nelle config ripristinate, per
 # quando il nuovo sistema ha username diverso.
-#   ./scripts/rehome.sh              elenca cosa cambierebbe (default)
-#   ./scripts/rehome.sh --apply      applica, con backup .rehome-bak
+#   ./scripts/rehome.sh                     elenca cosa cambierebbe (default)
+#   ./scripts/rehome.sh --apply             applica, con backup .rehome-bak
+#   ./scripts/rehome.sh --old-home PATH     per i backup anteriori a origin.home
 set -uo pipefail
 
-OLD_FILE="$HOME/.config/confsync/origin.home"
-[ -r "$OLD_FILE" ] || { echo "origin.home assente: backup troppo vecchio, passa il vecchio HOME a mano" >&2; exit 1; }
-OLD="$(cat "$OLD_FILE")"
-[ -n "$OLD" ] || { echo "origin.home vuoto" >&2; exit 1; }
-[ "$OLD" != "$HOME" ] || { echo "HOME invariato ($HOME): niente da fare"; exit 0; }
+APPLY=0; OLD=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply)    APPLY=1 ;;
+    --old-home) shift; OLD="${1:-}" ;;
+    *) echo "argomento sconosciuto: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
 
-APPLY=0; [ "${1:-}" = "--apply" ] && APPLY=1
+if [ -z "$OLD" ]; then
+  OLD_FILE="$HOME/.config/confsync/origin.home"
+  [ -r "$OLD_FILE" ] || { echo "origin.home assente (backup anteriore a questa versione): rilancia con --old-home /home/vecchio-utente" >&2; exit 1; }
+  OLD="$(cat "$OLD_FILE")"
+fi
+[ -n "$OLD" ] || { echo "vecchio HOME non determinato" >&2; exit 1; }
+[ "$OLD" != "$HOME" ] || { echo "HOME invariato ($HOME): niente da fare"; exit 0; }
 
 # Solo config che vengono *eseguite*. Fuori: .zsh_history e i transcript di
 # .claude (archivio: riscriverli falsifica ciò che è stato realmente digitato),
 # i log applicativi e i database LevelDB, che non sono testo da editare.
 ROOTS=(.zshrc .bashrc .profile .zprofile .aliases .gitconfig .tmux.conf
-       .config .claude/settings.json .claude/settings.local.json
-       .local/share/applications .local/bin bin)
+       .config .claude .local/share/applications .local/bin bin)
 # origin.home tiene il vecchio path per definizione: riscriverlo renderebbe
 # lo script non ripetibile.
-SKIP_RE='/\.config/confsync/origin\.home$|/(transcripts|projects|session-data|homunculus|jobs|sessions|backups|shell-snapshots)/|\.(log|log\.[0-9]+|bak|jsonl)$|\.rehome-bak$|(^|/)LOG(\.old)?$|/leveldb/|/Local Storage/|/Session Storage/'
+SKIP_RE='/\.config/confsync/origin\.home$|/(transcripts|projects|session-data|homunculus|jobs|sessions|backups|shell-snapshots|file-history|\.doctor-backup|statsig)/|\.(log|log\.[0-9]+|jsonl)$|\.(bak|doctor-bak)[^/]*$|\.rehome-bak$|(^|/)LOG(\.old)?$|/leveldb/|/Local Storage/|/Session Storage/'
 
 mapfile -t targets < <(
   for r in "${ROOTS[@]}"; do

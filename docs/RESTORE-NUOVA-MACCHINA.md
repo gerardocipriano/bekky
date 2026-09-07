@@ -42,6 +42,9 @@ Se sulla macchina nuova l'username è diverso, subito dopo il restore:
 ```bash
 ./scripts/rehome.sh            # elenca i file da riscrivere
 ./scripts/rehome.sh --apply    # riscrive (originali salvati in *.rehome-bak)
+
+# per i backup anteriori a origin.home il vecchio HOME va passato a mano:
+./scripts/rehome.sh --old-home /home/gerardp --apply
 ```
 
 Le unit systemd, i `.desktop` e diverse config contengono il path assoluto del vecchio `$HOME`: senza questo passaggio restano rotti. History e transcript di `.claude` non vengono toccati di proposito, sono archivio.
