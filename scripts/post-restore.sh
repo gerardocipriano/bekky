@@ -57,7 +57,14 @@ if [ -d "$UNITDIR" ]; then
     || skip "$broken eseguibili da ricreare (venv, nvm, binari non backuppati) prima di abilitare le unit"
 fi
 
-# 5. promemoria manuali
+# 5. username diverso da quello di origine: i path assoluti nelle config
+#    ripristinate vanno riscritti prima di abilitare qualsiasi unit.
+ORIGIN="$HOME/.config/confsync/origin.home"
+if [ -r "$ORIGIN" ] && [ "$(cat "$ORIGIN")" != "$HOME" ]; then
+  skip "HOME cambiato ($(cat "$ORIGIN") -> $HOME): lancia ./scripts/rehome.sh --apply"
+fi
+
+# 6. promemoria manuali
 if command -v apt-get >/dev/null; then
   ONEPW="scaricare il .deb da 1password.com e aggiungere il repo apt"
 else
