@@ -248,12 +248,15 @@ cmd_backup() {
   # La distro di origine serve al restore per capire se i nomi dei pacchetti
   # sono utilizzabili o solo indicativi (migrazione tra distro diverse).
   detect_distro > "$work/packages.distro"
+  # $HOME di origine: se il nuovo sistema ha username diverso, i path assoluti
+  # dentro unit systemd, .desktop e config vanno riscritti (scripts/rehome.sh).
+  printf '%s' "$HOME" > "$work/origin.home"
   command -v flatpak >/dev/null 2>&1 && \
     flatpak list --app --columns=application >> "$work/packages.txt" 2>/dev/null || true
 
   log "manifest + checksum"
   # MANIFEST.txt: sha dei file CIFRATI caricati (integrità del download/restore)
-  ( cd "$work" && for f in *.tar.enc repos.manifest.json packages.txt packages.distro; do
+  ( cd "$work" && for f in *.tar.enc repos.manifest.json packages.txt packages.distro origin.home; do
       [ -f "$f" ] && printf '%s  %s\n' "$(sha256sum "$f" | awk '{print $1}')" "$f"
     done ) > "$work/MANIFEST.txt"
   # BUNDLE.sha: firma del CONTENUTO (pre-cifratura) per il dedup — i .contentsha
@@ -300,6 +303,15 @@ cmd_restore() {
   fi
   [ -f "$work/dotfiles.tar.enc" ] && decrypt_unpack "$work/dotfiles.tar.enc" "$HOME"
   log "dotfiles ripristinati"
+  # Conservato per scripts/rehome.sh: il work dir è temporaneo.
+  if [ -f "$work/origin.home" ]; then
+    mkdir -p "$HOME/.config/confsync"
+    cp "$work/origin.home" "$HOME/.config/confsync/origin.home"
+    if [ "$(cat "$work/origin.home")" != "$HOME" ]; then
+      log "ATTENZIONE: backup creato con HOME=$(cat "$work/origin.home"), qui è $HOME"
+      log "i path assoluti nelle config vanno riscritti: ./scripts/rehome.sh"
+    fi
+  fi
 
   if [ $do_secrets -eq 1 ] && [ -f "$work/secrets.tar.enc" ]; then
     decrypt_unpack "$work/secrets.tar.enc" "$HOME"

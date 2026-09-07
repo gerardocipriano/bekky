@@ -107,3 +107,19 @@ setup() { setup_confsync; }
   [ "$status" -eq 0 ]
   [[ "$output" == *"ATTENZIONE"* ]]
 }
+
+@test "backup registra HOME di origine e restore avverte se cambia" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"; mkdir -p "$fakehome"
+  echo "alias x=y" > "$fakehome/.zshrc"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" CONFSYNC_WORKDIR_KEEP="$tmp/work" bash "$CONFSYNC" backup
+  [ "$(cat "$tmp/work/origin.home")" = "$fakehome" ]
+  newhome="$tmp/new"; mkdir -p "$newhome"
+  run env HOME="$newhome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" bash "$CONFSYNC" restore --yes
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"i path assoluti nelle config vanno riscritti"* ]]
+  [ "$(cat "$newhome/.config/confsync/origin.home")" = "$fakehome" ]
+}

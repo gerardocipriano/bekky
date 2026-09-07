@@ -37,6 +37,15 @@ cd ~/code/misc/bekky
 
 Cosa ottieni: dotfiles (zsh/bash + history, .config filtrato, `.claude` completo, CLAUDE.md), secrets (.ssh/.gnupg/creds gcloud, permessi 600), repo di `~/code` ri-clonate + file locali non tracciati (inclusi CLAUDE.md/.claude gitignored).
 
+Se sulla macchina nuova l'username è diverso, subito dopo il restore:
+
+```bash
+./scripts/rehome.sh            # elenca i file da riscrivere
+./scripts/rehome.sh --apply    # riscrive (originali salvati in *.rehome-bak)
+```
+
+Le unit systemd, i `.desktop` e diverse config contengono il path assoluto del vecchio `$HOME`: senza questo passaggio restano rotti. History e transcript di `.claude` non vengono toccati di proposito, sono archivio.
+
 Dopo il restore lancia `./scripts/post-restore.sh`: installa il cron settimanale e stampa i passi manuali rimanenti.
 
 Note Ubuntu:
