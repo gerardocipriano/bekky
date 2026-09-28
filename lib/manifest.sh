@@ -65,6 +65,7 @@ DOTFILES_ONLY_EXCLUDES=(
   '.config/gcloud/credentials.db' '.config/gcloud/access_tokens.db'
   '.config/gcloud/legacy_credentials' '.config/gcloud/logs'
   '.config/gh/hosts.yml'
+  '.claude/.credentials.json'
 )
 # Binari precompilati in .local/bin e bin: pesano ~175M e sono linkati contro
 # la glibc di questa macchina, quindi non sopravvivono a una distro con glibc
@@ -79,7 +80,7 @@ SECRET_PATHS=(
   .config/gcloud/credentials.db .config/gcloud/legacy_credentials
   .kube/config .kube/kubectx .docker/config.json .azure .boto .vault-token .env
   .config/gh/hosts.yml .git-credentials .pgpass .npmrc .pypirc
-  .local/share/keyrings
+  .local/share/keyrings .claude/.credentials.json
 )
 # Pattern che marcano un file come sensibile (usati anche nelle repo)
 SECRET_PATTERNS=( '.env' '.env.*' '*.key' '*.pem' '*secret*' '*token*' '*credential*'

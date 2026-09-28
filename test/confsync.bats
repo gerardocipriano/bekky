@@ -506,3 +506,22 @@ nuovo" ]
   [ -z "$(git -C "$repo" for-each-ref refs/bekky-restore)" ]
 }
 
+
+@test "restore --repos clona anche se la dir esiste gia' senza .git (clone precedente fallito)" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  setup_repo_sporca "$fakehome" "$tmp/origin"
+  headsha="$(git -C "$fakehome/code/acme/repo" rev-parse HEAD)"
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" bash "$CONFSYNC" backup
+  newhome="$tmp/new"; newrepo="$newhome/code/acme/repo"
+  mkdir -p "$newrepo"; printf 'locale\n' > "$newrepo/untracked-gia-estratto.txt"
+  run env HOME="$newhome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" bash "$CONFSYNC" restore --yes --repos
+  [ "$status" -eq 0 ]
+  [ "$(git -C "$newrepo" rev-parse HEAD)" = "$headsha" ]
+  [ "$(cat "$newrepo/untracked-gia-estratto.txt")" = "locale" ]
+  [ "$(cat "$newrepo/tracked.txt")" = "dal-backup" ]
+  [ ! -e "$newrepo.bekky-clone" ]
+}

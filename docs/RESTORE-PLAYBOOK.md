@@ -23,14 +23,27 @@ domande all'utente. Chiedi solo se un passo richiede davvero lui (GUI di
 
 ## Fase 1: restore dei dati
 
+Il restore sovrascrive `~/.claude.json` e `~/.claude/.credentials.json` della
+sessione in corso. Salva il login fatto su questo PC e rimettilo subito dopo:
+
 ```bash
 cd ~/code/misc/bekky
+mkdir -p ~/.config/confsync/restore-logs ~/.config/confsync/new-login
+cp -a ~/.claude/.credentials.json ~/.claude.json ~/.config/confsync/new-login/ 2>/dev/null
 export CONFSYNC_PASSPHRASE="$(cat ~/.config/confsync/passphrase)"
-./confsync restore --yes --secrets --repos --packages 2>&1 | tee ~/.config/confsync/restore-logs/restore.log
+./confsync restore --yes --secrets --packages 2>&1 | tee ~/.config/confsync/restore-logs/restore.log
 ```
 
-Controlla il log: nessun `ERRORE`, i `clone fallito` vanno annotati (di solito
-serve la chiave SSH, fase 3). L'inventario del vecchio sistema ora sta in
+```bash
+L=~/.config/confsync/new-login
+cp -a "$L/.credentials.json" ~/.claude/.credentials.json
+jq --slurpfile n "$L/.claude.json" '.oauthAccount = $n[0].oauthAccount | .userID = $n[0].userID' \
+  ~/.claude.json > ~/.claude.json.new && mv ~/.claude.json.new ~/.claude.json
+```
+
+Le repo si ripristinano in fase 3: le chiavi SSH stanno nell'agent di
+1Password, prima non c'è modo di clonare. Controlla il log: nessun `ERRORE`.
+L'inventario del vecchio sistema ora sta in
 `~/.config/confsync/inventory/` (leggi il suo `README.txt`). Da qui in poi è la
 fonte di verità per cosa installare.
 
@@ -61,8 +74,14 @@ nvm), `rtk` e `node`. Installali prima di tutto il resto:
    attivare Settings -> Developer -> "Integrate with CLI" e "Use the SSH agent".
    È l'unico passo con la GUI. Aspetta la conferma.
 3. `ssh -T git@github.com` e `ssh -T git@gitlab.com` devono rispondere.
-4. Rilancia `./confsync restore --yes --repos` per le repo che non si erano
-   clonate (è idempotente).
+4. Restore delle repo (~339 clone, 20-40 minuti, in background con log):
+   `./confsync restore --yes --repos > ~/.config/confsync/restore-logs/repos.log 2>&1`.
+   Ricrea anche commit non pushati, branch locali e stash dai bundle.
+   Idempotente: se qualche clone fallisce, sistema la causa e rilancialo.
+5. Controllo: `grep -c 'clone fallito' ~/.config/confsync/restore-logs/repos.log`
+   deve dare 0, oppure elenca le repo rimaste in "Da sistemare".
+6. Se 1Password chiede di autorizzare ogni processo che usa l'agent, chiedi
+   all'utente di scegliere "Approve for all applications" alla prima richiesta.
 
 ## Fase 4: pacchetti di sistema
 

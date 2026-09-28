@@ -30,7 +30,7 @@ fi
 ROOTS=(.zshrc .bashrc .profile .zprofile .aliases .gitconfig .tmux.conf
        .config .claude .claude.json .local/share/applications .local/bin bin
        scripts .hermes .opencode .gemini .agents .pixel-agents .claude-mem
-       .config/confsync/inventory/system/etc)
+       .config/confsync/inventory)
 # origin.home tiene il vecchio path per definizione: riscriverlo renderebbe
 # lo script non ripetibile.
 SKIP_RE='/\.config/confsync/origin\.home$|/(transcripts|projects|session-data|homunculus|jobs|sessions|backups|shell-snapshots|file-history|\.doctor-backup|statsig)/|\.(log|log\.[0-9]+|jsonl)$|\.(bak|doctor-bak)[^/]*$|\.rehome-bak$|(^|/)LOG(\.old)?$|/leveldb/|/Local Storage/|/Session Storage/'
