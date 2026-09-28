@@ -15,9 +15,11 @@ if command -v pacman >/dev/null; then
   if ! command -v paccache >/dev/null; then
     sudo pacman -S --needed --noconfirm pacman-contrib
   fi
-  sudo systemctl enable --now paccache.timer \
-    && ok "paccache.timer attivo (pulizia cache pacman settimanale)" \
-    || skip "paccache.timer non abilitato"
+  if sudo systemctl enable --now paccache.timer; then
+    ok "paccache.timer attivo (pulizia cache pacman settimanale)"
+  else
+    skip "paccache.timer non abilitato"
+  fi
 else
   skip "non-Arch: paccache saltato"
 fi
@@ -53,8 +55,11 @@ if [ -d "$UNITDIR" ]; then
     [ -n "$exe" ] || continue
     [ -x "${exe/#\%h/$HOME}" ] || { printf '  \033[33m!\033[0m ExecStart mancante: %s\n' "$exe"; broken=$((broken+1)); }
   done < <(grep -h '^ExecStart=' "$UNITDIR"/*.service 2>/dev/null | sed 's/^ExecStart=//' | awk '{print $1}' | sort -u)
-  [ "$broken" -eq 0 ] && ok "unit utente: tutti gli ExecStart risolvibili" \
-    || skip "$broken eseguibili da ricreare (venv, nvm, binari non backuppati) prima di abilitare le unit"
+  if [ "$broken" -eq 0 ]; then
+    ok "unit utente: tutti gli ExecStart risolvibili"
+  else
+    skip "$broken eseguibili da ricreare (venv, nvm, binari non backuppati) prima di abilitare le unit"
+  fi
 fi
 
 # 5. username diverso da quello di origine: i path assoluti nelle config

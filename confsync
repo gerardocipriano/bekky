@@ -682,6 +682,152 @@ cmd_backup() {
   log "backup completato: $ts"
 }
 
+# --- Restore delle repo dai bundle -------------------------------------------
+# Il remote non contiene cio che e' rimasto in locale: il bundle e' l'unica
+# copia dei commit non pushati e degli stash, quindi senza applicarlo una repo
+# ripristinata perderebbe lavoro.
+
+# Nel manifest i path sono quelli della macchina di origine: con una HOME
+# diversa vanno rimappati, altrimenti il restore scrive fuori dalla home
+# corrente (o dentro la vecchia, se esiste ancora).
+_restore_repo_path() {
+  local p="$1" origin="$2"
+  if [ -n "$origin" ] && [ "$p" != "$origin" ] && [ "${p#"$origin"/}" != "$p" ]; then
+    printf '%s' "$HOME/${p#"$origin"/}"
+  else
+    printf '%s' "$p"
+  fi
+}
+
+# Applica a PATH i commit e gli stash del bundle: branch mancanti creati,
+# branch indietro fast-forwardati, branch divergenti lasciati intatti e
+# copiati su bekky/<branch>. I ref temporanei refs/bekky-restore/* spariscono
+# SEMPRE, anche su errore (subshell con trap, come repo_bundle).
+_restore_repo_bundle() {
+  local path="$1" bundle="$2"
+  (
+    local ref b current n sha
+    # refs temporanei spariti SEMPRE, anche su errore
+    # shellcheck disable=SC2329  # invocata via trap EXIT qui sotto
+    cleanup() {
+      local r
+      while IFS= read -r r; do
+        git -C "$path" update-ref -d "$r" 2>/dev/null || true
+      done < <(git -C "$path" for-each-ref --format='%(refname)' refs/bekky-restore 2>/dev/null || true)
+    }
+    trap cleanup EXIT
+    # refspec con wildcards: quelle che non matchano sono un no-op silenzioso,
+    # i bundle non contengono sempre gli stash
+    git -C "$path" fetch "$bundle" \
+      'refs/heads/*:refs/bekky-restore/heads/*' \
+      'refs/bekky/stash/*:refs/bekky-restore/stash/*' >/dev/null 2>&1 || true
+    # i bundle delle repo senza remote sono creati con --all: lo stash c'e'
+    # come refs/stash, non come refs/bekky/stash/N (refspec concreto e
+    # inesistente, invece, fa fallire tutto il fetch)
+    if git bundle list-heads "$bundle" 2>/dev/null | grep -q ' refs/stash$'; then
+      git -C "$path" fetch "$bundle" 'refs/stash:refs/bekky-restore/stash/0' >/dev/null 2>&1 || true
+    fi
+
+    current="$(git -C "$path" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      b="${ref#refs/bekky-restore/heads/}"
+      sha="$(git -C "$path" rev-parse "$ref" 2>/dev/null || true)"
+      [ -n "$sha" ] || continue
+      if ! git -C "$path" show-ref --verify --quiet "refs/heads/$b"; then
+        if git -C "$path" branch "$b" "$sha" >/dev/null 2>&1; then
+          log "branch dal bundle: $b"
+        fi
+      elif [ "$(git -C "$path" rev-parse "refs/heads/$b" 2>/dev/null || true)" = "$sha" ]; then
+        continue   # gia' allineati (restore ripetuto): niente da fare
+      elif git -C "$path" merge-base --is-ancestor "refs/heads/$b" "$sha" 2>/dev/null; then
+        # il bundle e' piu' avanti: fast-forward. git branch -f rifiuta di
+        # spostare il branch corrente, quindi li si tocca con un merge
+        if [ "$b" = "$current" ]; then
+          if git -C "$path" merge --ff-only "$sha" >/dev/null 2>&1; then
+            log "branch aggiornato dal bundle: $b"
+          else
+            log "fast-forward di '$b' saltato (worktree non pulito): resta indietro"
+          fi
+        elif git -C "$path" branch -f "$b" "$sha" >/dev/null 2>&1; then
+          log "branch aggiornato dal bundle: $b"
+        fi
+      else
+        # divergente: il branch locale vince, il bundle non si perde
+        if git -C "$path" branch "bekky/$b" "$sha" >/dev/null 2>&1; then
+          log "branch '$b' divergente dal backup: salvato come bekky/$b"
+        fi
+      fi
+    done < <(git -C "$path" for-each-ref --format='%(refname)' refs/bekky-restore/heads 2>/dev/null || true)
+
+    # stash@{0} del backup era il piu' recente e git stash store mette in
+    # cima: ripristinando dal piu' vecchio al piu' recente l'ordine si
+    # conserva
+    local names=()
+    while IFS= read -r n; do names+=("$n"); done < <(
+      git -C "$path" for-each-ref --format='%(refname)' refs/bekky-restore/stash 2>/dev/null \
+        | sed -n 's#.*/##p' | grep -E '^[0-9]+$' | sort -rn || true)
+    if [ ${#names[@]} -gt 0 ]; then
+      for n in "${names[@]}"; do
+        sha="$(git -C "$path" rev-parse "refs/bekky-restore/stash/$n" 2>/dev/null || true)"
+        [ -n "$sha" ] || continue
+        # idempotente: uno stash con lo stesso sha non si duplica
+        if git -C "$path" stash list --format=%H 2>/dev/null | grep -qxF "$sha"; then continue; fi
+        if git -C "$path" stash store -m "bekky stash $n" "$sha" >/dev/null 2>&1; then
+          log "stash $n ripristinato"
+        fi
+      done
+    fi
+  )
+  return 0
+}
+
+# Una repo del manifest: clone (dal remote, o dal bundle se non c'e' remote) e
+# applicazione del bundle. Idempotente: su una repo gia' su disco non si
+# riclona e gli stash non si duplicano.
+restore_repo() {
+  local path="$1" remote="$2" branch="$3" bundle="$4"
+  local rel out cloned=0 applied=0
+  rel="${path#"$HOME"/}"
+  if [ -d "$path/.git" ]; then
+    log "repo gia' presente, non riclono: $rel"
+  elif [ -n "$remote" ]; then
+    mkdir -p "$(dirname "$path")"
+    # senza prompt: un remote https senza credenziali bloccherebbe il restore
+    if out="$(GIT_TERMINAL_PROMPT=0 git clone "$remote" "$path" 2>&1)"; then cloned=1; else
+      log "clone fallito: $rel ($remote)"; printf '%s\n' "$out" >&2; return 0
+    fi
+  elif [ -f "$bundle" ]; then
+    # niente remote: il bundle e' l'unica copia della repo
+    mkdir -p "$(dirname "$path")"
+    if out="$(git clone "$bundle" "$path" 2>&1)"; then
+      cloned=1
+      # il remote punterebbe al bundle in ~/.config/confsync/bundles, che il
+      # prossimo restore sostituisce: la repo deve restare senza remote
+      git -C "$path" remote remove origin >/dev/null 2>&1 || true
+    else
+      log "clone dal bundle fallito: $rel"; printf '%s\n' "$out" >&2; return 0
+    fi
+  else
+    log "skip $rel (no remote, nessun bundle)"
+    return 0
+  fi
+
+  if [ -f "$bundle" ]; then
+    _restore_repo_bundle "$path" "$bundle"
+    applied=1
+  fi
+
+  # il branch registrato si mette solo se la repo e' stata toccata dal
+  # restore: su una repo gia' in uso non si cambia sotto i piedi
+  if [ -n "$branch" ] && [ $((cloned + applied)) -gt 0 ]; then
+    if ! git -C "$path" checkout "$branch" >/dev/null 2>&1; then
+      log "checkout di '$branch' non riuscito in $rel"
+    fi
+  fi
+  return 0
+}
+
 cmd_restore() {
   require_deps; require_bucket
   local do_secrets=0 do_repos=0 do_pkgs=0 dryrun=0 assume_yes=0
@@ -736,27 +882,30 @@ cmd_restore() {
   if [ $do_repos -eq 1 ] && [ -f "$work/repos.manifest.json" ]; then
     # I bundle servono al ripristino delle repo: si estraggono prima di
     # qualunque operazione git, che li usa come sorgente dei commit locali.
+    local bunddir="$HOME/.config/confsync/bundles"
     if [ -f "$work/repo-bundles.tar.enc" ]; then
-      local bunddir="$HOME/.config/confsync/bundles"
       rm -rf "$bunddir"
       decrypt_unpack "$work/repo-bundles.tar.enc" "$bunddir"
       log "bundle delle repo estratti in $bunddir"
     fi
-    local entry path remote branch
+    # path del manifest = home di origine: vanno rimappati sulla home corrente
+    local origin; origin="$(cat "$work/origin.home" 2>/dev/null || echo "$HOME")"
+    local entry path remote branch bundle bundled
     grep -o '{[^}]*}' "$work/repos.manifest.json" | while read -r entry; do
       path="$(echo "$entry"  | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')"
       remote="$(echo "$entry"| sed -n 's/.*"remote":"\([^"]*\)".*/\1/p')"
       branch="$(echo "$entry"| sed -n 's/.*"branch":"\([^"]*\)".*/\1/p')"
-      [ -n "$remote" ] || { log "skip $path (no remote)"; continue; }
-      if [ ! -d "$path/.git" ]; then
-        mkdir -p "$(dirname "$path")"
-        if git clone "$remote" "$path"; then
-          [ -n "$branch" ] && git -C "$path" checkout "$branch" 2>/dev/null || true
-        else
-          log "clone fallito: $path ($remote)"
-        fi
+      bundled="$(echo "$entry"| sed -n 's/.*"bundle":"\([^"]*\)".*/\1/p')"
+      [ -n "$path" ] || continue
+      path="$(_restore_repo_path "$path" "$origin")"
+      bundle="$bunddir/${path#"$HOME"/}/repo.bundle"
+      if [ ! -f "$bundle" ] && [ "$bundled" = "1" ]; then
+        log "bundle mancante per ${path#"$HOME"/}: commit locali non ripristinati"
       fi
+      restore_repo "$path" "$remote" "$branch" "$bundle"
     done
+    # DOPO tutti i passi git: i file locali sovrascrivono i tracciati
+    # modificati con la versione del backup.
     [ -f "$work/repo-localfiles.tar.enc" ] && decrypt_unpack "$work/repo-localfiles.tar.enc" "$HOME"
     log "repo ripristinate"
   fi

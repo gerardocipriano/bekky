@@ -358,3 +358,151 @@ EOF
   # le versioni nvm sono ordinate, non nell'ordine di ls
   [ "$(cat "$tmp/inv1/dev/nvm-versions.txt")" = "$(printf 'v20\nv22')" ]
 }
+
+# Repo di prova con remote bare locale, commit non pushato, stash e un file
+# tracciato modificato: il caso completo del T4.
+setup_repo_sporca() {
+  local home="$1" origin="$2"
+  local repo="$home/code/acme/repo"; mkdir -p "$repo"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email t@example.com
+  git -C "$repo" config user.name test
+  git init -q --bare "$origin/repo.git"
+  git -C "$repo" remote add origin "$origin/repo.git"
+  printf 'base\n'    > "$repo/readme.md"
+  printf 'tracked\n' > "$repo/tracked.txt"
+  git -C "$repo" add readme.md tracked.txt
+  git -C "$repo" commit -qm init
+  git -C "$repo" push -q origin main
+  # commit locale non pushato
+  printf 'nuovo\n' >> "$repo/readme.md"
+  git -C "$repo" add readme.md && git -C "$repo" commit -qm unpushed
+  # branch con slash mai pushato
+  git -C "$repo" checkout -qb feat/x
+  printf 'feat\n' > "$repo/feat.txt"
+  git -C "$repo" add feat.txt && git -C "$repo" commit -qm feat
+  git -C "$repo" checkout -q main
+  # due stash in successione: al restore l'ordine deve restare lo stesso
+  printf 'traccia1\n' > "$repo/tracked.txt"
+  git -C "$repo" add tracked.txt && git -C "$repo" stash push -qm "stash vecchio"
+  printf 'traccia2\n' > "$repo/altro.txt"
+  git -C "$repo" add altro.txt && git -C "$repo" stash push -qm "stash recente"
+  # file tracciato modificato di nuovo: torna da repo-localfiles
+  printf 'dal-backup\n' > "$repo/tracked.txt"
+  # file fuori da ogni repo
+  printf 'contest\n' > "$home/code/acme/CLAUDE.md"
+}
+
+@test "T4: restore --repos porta indietro commit non pushati, stash e file locali" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  setup_repo_sporca "$fakehome" "$tmp/origin"
+  repo="$fakehome/code/acme/repo"
+  headsha="$(git -C "$repo" rev-parse HEAD)"
+  stashesha0="$(git -C "$repo" rev-parse 'stash@{0}')"
+  stashesha1="$(git -C "$repo" rev-parse 'stash@{1}')"
+  featsha="$(git -C "$repo" rev-parse feat/x)"
+
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" bash "$CONFSYNC" backup
+
+  newhome="$tmp/new"; mkdir -p "$newhome"
+  run env HOME="$newhome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" bash "$CONFSYNC" restore --yes --repos
+  [ "$status" -eq 0 ]
+
+  newrepo="$newhome/code/acme/repo"
+  [ -d "$newrepo/.git" ]
+  # il commit non pushato e' sul branch, non solo nel remote
+  [ "$(git -C "$newrepo" symbolic-ref --short HEAD)" = "main" ]
+  [ "$(git -C "$newrepo" rev-parse HEAD)" = "$headsha" ]
+  [ "$(cat "$newrepo/readme.md")" = "base
+nuovo" ]
+  # lo stash torna indietro, con lo stesso ordine (stash@{0} era il piu' recente)
+  [ -n "$(git -C "$newrepo" stash list)" ]
+  [ "$(git -C "$newrepo" rev-parse 'stash@{0}')" = "$stashesha0" ]
+  [ "$(git -C "$newrepo" rev-parse 'stash@{1}')" = "$stashesha1" ]
+  # i file locali sovrascrivono i tracciati modificati col contenuto del backup
+  [ "$(cat "$newrepo/tracked.txt")" = "dal-backup" ]
+  [ "$(cat "$newhome/code/acme/CLAUDE.md")" = "contest" ]
+  [ "$(git -C "$newrepo" rev-parse feat/x)" = "$featsha" ]
+  # nessun ref temporaneo resta nella repo ripristinata
+  [ -z "$(git -C "$newrepo" for-each-ref refs/bekky-restore)" ]
+  # un secondo restore non duplica gli stash
+  run env HOME="$newhome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" bash "$CONFSYNC" restore --yes --repos
+  [ "$status" -eq 0 ]
+  [ "$(git -C "$newrepo" stash list | wc -l)" -eq 2 ]
+  [ "$(cat "$newrepo/tracked.txt")" = "dal-backup" ]
+}
+
+@test "T4: repo senza remote ripristinata dal bundle, senza origin pendente" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  # nessun remote: il bundle e' l'unica copia
+  repo="$fakehome/code/solo/repo"; mkdir -p "$repo"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email t@example.com
+  git -C "$repo" config user.name test
+  printf 'uno\n' > "$repo/f.txt"; git -C "$repo" add f.txt; git -C "$repo" commit -qm primo
+  printf 'due\n' > "$repo/g.txt"; git -C "$repo" add g.txt; git -C "$repo" commit -qm secondo
+  printf 'stash\n' > "$repo/f.txt"
+  git -C "$repo" stash push -qm "stash locale"
+  headsha="$(git -C "$repo" rev-parse HEAD)"
+  stashsha="$(git -C "$repo" rev-parse 'stash@{0}')"
+
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" bash "$CONFSYNC" backup
+
+  newhome="$tmp/new"; mkdir -p "$newhome"
+  run env HOME="$newhome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" bash "$CONFSYNC" restore --yes --repos
+  [ "$status" -eq 0 ]
+  newrepo="$newhome/code/solo/repo"
+  [ -d "$newrepo/.git" ]
+  [ "$(git -C "$newrepo" rev-parse HEAD)" = "$headsha" ]
+  [ "$(git -C "$newrepo" rev-parse 'stash@{0}')" = "$stashsha" ]
+  # il remote origin punterebbe al bundle, che il restore successivo rimpiazza
+  [ -z "$(git -C "$newrepo" remote)" ]
+  [ -z "$(git -C "$newrepo" for-each-ref refs/bekky-restore)" ]
+}
+
+@test "T4: restore --repos su repo gia' presente non riclona e non perde il branch locale" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  setup_repo_sporca "$fakehome" "$tmp/origin"
+  repo="$fakehome/code/acme/repo"
+  headsha="$(git -C "$repo" rev-parse HEAD)"
+  stashesha0="$(git -C "$repo" rev-parse 'stash@{0}')"
+
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" bash "$CONFSYNC" backup
+
+  # dopo il backup il branch e' stato resettato e rilanciato altrove: il
+  # bundle non puo' piu' essere applicato con un fast-forward
+  git -C "$repo" checkout -q main
+  git -C "$repo" reset --hard -q origin/main
+  printf 'altra-strada\n' > "$repo/readme.md"
+  git -C "$repo" add readme.md && git -C "$repo" commit -qm "reset e ricominciato"
+  localsha="$(git -C "$repo" rev-parse HEAD)"
+
+  # backup e restore sulla stessa HOME: la repo c'e' gia', non si riclona
+  run env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" bash "$CONFSYNC" restore --yes --repos
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"divergente"* ]]
+  [ -n "$(git -C "$repo" remote get-url origin)" ]
+  [ "$(git -C "$repo" rev-parse HEAD)" = "$localsha" ]
+  # il branch locale vince, il bundle resta su bekky/main
+  [ "$(git -C "$repo" rev-parse refs/heads/bekky/main)" = "$headsha" ]
+  # gli stash identici non si duplicano
+  [ "$(git -C "$repo" stash list | wc -l)" -eq 2 ]
+  [ "$(git -C "$repo" rev-parse 'stash@{0}')" = "$stashesha0" ]
+  # i file locali tornano col contenuto del backup
+  [ "$(cat "$repo/tracked.txt")" = "dal-backup" ]
+  [ -z "$(git -C "$repo" for-each-ref refs/bekky-restore)" ]
+}
+

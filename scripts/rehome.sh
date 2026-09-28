@@ -28,7 +28,9 @@ fi
 # .claude (archivio: riscriverli falsifica ciò che è stato realmente digitato),
 # i log applicativi e i database LevelDB, che non sono testo da editare.
 ROOTS=(.zshrc .bashrc .profile .zprofile .aliases .gitconfig .tmux.conf
-       .config .claude .local/share/applications .local/bin bin)
+       .config .claude .claude.json .local/share/applications .local/bin bin
+       scripts .hermes .opencode .gemini .agents .pixel-agents .claude-mem
+       .config/confsync/inventory/system/etc)
 # origin.home tiene il vecchio path per definizione: riscriverlo renderebbe
 # lo script non ripetibile.
 SKIP_RE='/\.config/confsync/origin\.home$|/(transcripts|projects|session-data|homunculus|jobs|sessions|backups|shell-snapshots|file-history|\.doctor-backup|statsig)/|\.(log|log\.[0-9]+|jsonl)$|\.(bak|doctor-bak)[^/]*$|\.rehome-bak$|(^|/)LOG(\.old)?$|/leveldb/|/Local Storage/|/Session Storage/'
@@ -40,7 +42,7 @@ mapfile -t targets < <(
   done | sort -u | grep -Ev "$SKIP_RE"
 )
 
-[ "${#targets[@]}" -gt 0 ] || { echo "nessun riferimento a $OLD nelle config attive"; exit 0; }
+[ "${#targets[@]}" -gt 0 ] || echo "nessun riferimento a $OLD nelle config attive"
 
 echo "$OLD -> $HOME   (${#targets[@]} file)"
 for f in "${targets[@]}"; do
@@ -50,6 +52,21 @@ for f in "${targets[@]}"; do
     cp -a "$f" "$f.rehome-bak" && sed -i "s|$OLD|$HOME|g" "$f"
   fi
 done
+
+# Claude Code tiene memoria e sessioni in ~/.claude/projects/<cwd codificata>:
+# con un altro HOME le directory vanno rinominate o la memoria non si aggancia.
+enc() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }
+PROJ="$HOME/.claude/projects"
+if [ -d "$PROJ" ]; then
+  oldp="$(enc "$OLD")"; newp="$(enc "$HOME")"
+  for d in "$PROJ/$oldp" "$PROJ/$oldp"-*; do
+    [ -d "$d" ] || continue
+    dst="$PROJ/$newp${d#"$PROJ/$oldp"}"
+    [ -e "$dst" ] && { echo "  skip ${d#"$PROJ"/}: esiste già $(basename "$dst")"; continue; }
+    echo "  rinomina projects/${d#"$PROJ"/} -> $(basename "$dst")"
+    [ "$APPLY" -eq 1 ] && mv "$d" "$dst"
+  done
+fi
 
 if [ "$APPLY" -eq 1 ]; then
   echo "applicato (originali in *.rehome-bak)"
