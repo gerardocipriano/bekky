@@ -148,3 +148,80 @@ setup() { setup_confsync; }
   [[ "$output" == *"i path assoluti nelle config vanno riscritti"* ]]
   [ "$(cat "$newhome/.config/confsync/origin.home")" = "$fakehome" ]
 }
+
+@test "T2: commit/stash non pushati in bundle, file locali di repo routati correttamente" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  repo="$fakehome/code/acme/repo"; mkdir -p "$repo"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email t@example.com
+  git -C "$repo" config user.name test
+  git init -q --bare "$tmp/origin/repo.git"
+  git -C "$repo" remote add origin "$tmp/origin/repo.git"
+  printf 'terraform.tfvars\nnode_modules/\n' > "$repo/.gitignore"
+  printf 'base\n'    > "$repo/readme.md"
+  printf 'tracked\n' > "$repo/tracked.txt"
+  git -C "$repo" add . && git -C "$repo" commit -qm init
+  git -C "$repo" push -q origin main
+  # commit locale non pushato
+  printf 'nuovo\n' >> "$repo/readme.md"
+  git -C "$repo" add readme.md && git -C "$repo" commit -qm unpushed
+  # stash di un cambiamento tracciato
+  printf 'mod\n' > "$repo/tracked.txt"
+  git -C "$repo" add tracked.txt && git -C "$repo" stash push -qm "stash tracked"
+  # file tracciato nuovamente modificato
+  printf 'modv2\n' > "$repo/tracked.txt"
+  # file ignorati: un .tfvars (segreto) e uno dentro node_modules/ (junk)
+  printf 'secret=1\n' > "$repo/terraform.tfvars"
+  mkdir -p "$repo/node_modules"; printf 'dep\n' > "$repo/node_modules/dep.js"
+
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" CONFSYNC_WORKDIR_KEEP="$tmp/work" \
+      bash "$CONFSYNC" backup
+
+  [ -f "$tmp/work/repo-bundles.tar.enc" ]
+  [ -f "$tmp/work/repo-localfiles.tar.enc" ]
+  headsha="$(git -C "$repo" rev-parse HEAD)"
+  for a in repo-bundles repo-localfiles secrets; do
+    env CONFSYNC_PASSPHRASE=tp bash -c \
+      'source "$0" --source-only; decrypt_unpack "$1" "$2"' \
+      "$CONFSYNC" "$tmp/work/$a.tar.enc" "$tmp/ext-$a"
+  done
+  # il bundle porta il branch locale (commit non pushato) e lo stash
+  run git bundle list-heads "$tmp/ext-repo-bundles/code/acme/repo/repo.bundle"
+  [ "$status" -eq 0 ]
+  grep -q 'refs/heads/main'    <<<"$output"
+  grep -q 'refs/bekky/stash/0' <<<"$output"
+  grep -q "$headsha"           <<<"$output"
+  # file tracciato modificato -> repo-localfiles
+  [ "$(cat "$tmp/ext-repo-localfiles/code/acme/repo/tracked.txt")" = "modv2" ]
+  # ignorato segreto -> secrets, ignorato in node_modules -> da nessuna parte
+  [ "$(cat "$tmp/ext-secrets/code/acme/repo/terraform.tfvars")" = "secret=1" ]
+  [ ! -e "$tmp/ext-repo-localfiles/code/acme/repo/node_modules" ]
+  [ ! -e "$tmp/ext-secrets/code/acme/repo/node_modules" ]
+  # i ref temporanei dei bundle NON restano nella repo sorgente
+  [ -z "$(git -C "$repo" for-each-ref refs/bekky)" ]
+}
+
+@test "T2: file fuori da ogni repo (note/script sparsi) finiscono in repo-localfiles" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  # senza git: CLAUDE.md in una dir cliente e una cartella di script
+  mkdir -p "$fakehome/code/clienteX"
+  printf 'contest\n' > "$fakehome/code/clienteX/CLAUDE.md"
+  mkdir -p "$fakehome/code/scripts"
+  printf 'echo hi\n' > "$fakehome/code/scripts/helper.sh"
+
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" CONFSYNC_WORKDIR_KEEP="$tmp/work" \
+      bash "$CONFSYNC" backup
+
+  [ -f "$tmp/work/repo-localfiles.tar.enc" ]
+  env CONFSYNC_PASSPHRASE=tp bash -c \
+    'source "$0" --source-only; decrypt_unpack "$1" "$2"' \
+    "$CONFSYNC" "$tmp/work/repo-localfiles.tar.enc" "$tmp/ext"
+  [ "$(cat "$tmp/ext/code/clienteX/CLAUDE.md")" = "contest" ]
+  [ "$(cat "$tmp/ext/code/scripts/helper.sh")" = "echo hi" ]
+}
