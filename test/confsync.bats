@@ -57,6 +57,31 @@ setup() { setup_confsync; }
   run bash -c 'source "$0" --source-only; is_secret_path "README.md"' "$CONFSYNC"; [ "$status" -ne 0 ]
 }
 
+@test "credenziali gcloud e gh: solo in secrets.tar.enc, mai in dotfiles.tar.enc" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"
+  mkdir -p "$fakehome/.config/gcloud" "$fakehome/.config/gh"
+  echo "alias x=y" > "$fakehome/.zshrc"
+  echo '{"cred":"segreto"}' > "$fakehome/.config/gcloud/credentials.db"
+  echo "oauth: segreto"     > "$fakehome/.config/gh/hosts.yml"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" CONFSYNC_WORKDIR_KEEP="$tmp/work" bash "$CONFSYNC" backup
+  [ -f "$tmp/work/dotfiles.tar.enc" ]; [ -f "$tmp/work/secrets.tar.enc" ]
+  for a in dotfiles secrets; do
+    env CONFSYNC_PASSPHRASE=tp bash -c \
+      'source "$0" --source-only; decrypt_unpack "$1" "$2"' \
+      "$CONFSYNC" "$tmp/work/$a.tar.enc" "$tmp/ext-$a"
+  done
+  # i dotfiles non devono contenere credenziali...
+  [ "$(cat "$tmp/ext-dotfiles/.zshrc")" = "alias x=y" ]
+  [ ! -e "$tmp/ext-dotfiles/.config/gcloud/credentials.db" ]
+  [ ! -e "$tmp/ext-dotfiles/.config/gh/hosts.yml" ]
+  # ...ma l'archivio secrets cifrato sì
+  [ "$(cat "$tmp/ext-secrets/.config/gcloud/credentials.db")" = '{"cred":"segreto"}' ]
+  [ "$(cat "$tmp/ext-secrets/.config/gh/hosts.yml")" = "oauth: segreto" ]
+}
+
 @test "cmd_backup genera tutti gli artefatti e chiama upload" {
   tmp="$(mktemp -d)"; export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
   fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fake_gsutil "$fakebin"

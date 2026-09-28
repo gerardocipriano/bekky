@@ -29,6 +29,8 @@ else
   EXCLUDE_PATTERNS=('*/Cache/*' '*.log' '*/.git/*' '*/node_modules/*')
   SECRET_PATHS=(.ssh .gnupg .netrc)
   SECRET_PATTERNS=('.env' '*.key' '*.pem' '*secret*' '*token*')
+  # shellcheck disable=SC2034
+  DOTFILES_ONLY_EXCLUDES=()
   REPO_SCAN_DIRS=("$HOME/code")
 fi
 
@@ -104,6 +106,12 @@ pack_encrypt() {
   local tar_opts=(--sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner
                   --warning=no-file-changed --ignore-failed-read)
   local ex; for ex in "${EXCLUDE_PATTERNS[@]}"; do tar_opts+=(--exclude="$ex"); done
+  # DOTFILES_ONLY_EXCLUDES (credenziali gcloud/gh) solo per l'archivio dotfiles:
+  # applicale a tutti gli archivi le eliminerebbe anche da secrets.tar.enc,
+  # perché i --exclude di tar matchano su qualunque suffisso del path.
+  if [ "${PACK_DOTFILES:-0}" = "1" ]; then
+    for ex in "${DOTFILES_ONLY_EXCLUDES[@]}"; do tar_opts+=(--exclude="$ex"); done
+  fi
   _tar_stream "${tar_opts[@]}" -C "$src" -cf - "${existing[@]}" \
     | eval "$(_comp_cmd)" \
     | openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -pass fd:3 -out "$out" 3<<<"$pass"
@@ -210,7 +218,7 @@ cmd_backup() {
   [ -n "${CONFSYNC_WORKDIR_KEEP:-}" ] || trap "rm -rf '$work'" EXIT
 
   log "raccolgo dotfiles"
-  pack_encrypt "$HOME" "$work/dotfiles.tar.enc" "${INCLUDE_DOTFILES[@]}"
+  PACK_DOTFILES=1 pack_encrypt "$HOME" "$work/dotfiles.tar.enc" "${INCLUDE_DOTFILES[@]}"
 
   log "raccolgo secrets"
   local secstage="$work/.sec"; mkdir -p "$secstage"
