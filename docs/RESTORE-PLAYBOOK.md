@@ -166,7 +166,8 @@ okular, spectacle, ark, ...).
   `curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`
   (lo stesso usato sul vecchio PC) e verifica che non sovrascriva `config.yaml`.
 - crontab: `crontab inventory/system/crontab.txt`, dopo aver riscritto il
-  vecchio HOME se cambiato. Il job di bekky deve esserci.
+  vecchio HOME se cambiato. Il job di bekky deve esserci; togli la riga
+  marcata `bekky-migrazione` (backup giornaliero temporaneo del vecchio PC).
 - Connessioni NetworkManager: sono solo nomi in `nm-connections.txt` (le
   credenziali stanno in /etc, root-only). Elencale all'utente nel report finale.
 
