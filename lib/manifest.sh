@@ -22,6 +22,8 @@ INCLUDE_DOTFILES=(
   .local/share/opencode .local/share/opencode-working-memory
   .local/share/clarvis .local/share/tirith .local/share/k9s
   .local/share/DBeaverData .local/share/icons .local/share/wallpapers
+  .local/share/konsole .local/share/plasma .local/share/dolphin .local/share/remmina
+  '.local/share/Foxit Software' .dbclient .gitignore .psql_history
   # Script e config di tool usati da cron, alias e unit
   scripts tools Wallpapers
   .terraformrc .terraform.d .gitlab .nanorc .dir_colors .fonts.conf
@@ -80,7 +82,7 @@ SECRET_PATHS=(
   .config/gcloud/credentials.db .config/gcloud/legacy_credentials
   .kube/config .kube/kubectx .docker/config.json .azure .boto .vault-token .env
   .config/gh/hosts.yml .git-credentials .pgpass .npmrc .pypirc
-  .local/share/keyrings .claude/.credentials.json
+  .local/share/keyrings .local/share/kwalletd .claude/.credentials.json
 )
 # Pattern che marcano un file come sensibile (usati anche nelle repo)
 SECRET_PATTERNS=( '.env' '.env.*' '*.key' '*.pem' '*secret*' '*token*' '*credential*'
