@@ -787,27 +787,31 @@ _restore_repo_bundle() {
 # riclona e gli stash non si duplicano.
 restore_repo() {
   local path="$1" remote="$2" branch="$3" bundle="$4"
-  local rel out cloned=0 applied=0
+  local rel out src cloned=0 applied=0
   rel="${path#"$HOME"/}"
   if [ -d "$path/.git" ]; then
     log "repo gia' presente, non riclono: $rel"
-  elif [ -n "$remote" ]; then
-    mkdir -p "$(dirname "$path")"
-    # senza prompt: un remote https senza credenziali bloccherebbe il restore
-    if out="$(GIT_TERMINAL_PROMPT=0 git clone "$remote" "$path" 2>&1)"; then cloned=1; else
-      log "clone fallito: $rel ($remote)"; printf '%s\n' "$out" >&2; return 0
-    fi
-  elif [ -f "$bundle" ]; then
+  elif [ -n "$remote" ] || [ -f "$bundle" ]; then
     # niente remote: il bundle e' l'unica copia della repo
-    mkdir -p "$(dirname "$path")"
-    if out="$(git clone "$bundle" "$path" 2>&1)"; then
-      cloned=1
-      # il remote punterebbe al bundle in ~/.config/confsync/bundles, che il
-      # prossimo restore sostituisce: la repo deve restare senza remote
-      git -C "$path" remote remove origin >/dev/null 2>&1 || true
-    else
-      log "clone dal bundle fallito: $rel"; printf '%s\n' "$out" >&2; return 0
+    src="${remote:-$bundle}"
+    # La dir puo' esistere gia' senza .git: un restore precedente con clone
+    # fallito (SSH non pronto) vi ha estratto i file locali. git clone rifiuta
+    # una dir non vuota, quindi si clona a parte e si sposta dentro solo .git.
+    local tmp="$path.bekky-clone"
+    rm -rf "$tmp"; mkdir -p "$(dirname "$path")"
+    # senza prompt: un remote https senza credenziali bloccherebbe il restore
+    if ! out="$(GIT_TERMINAL_PROMPT=0 git clone --no-checkout "$src" "$tmp" 2>&1)"; then
+      rm -rf "$tmp"
+      log "clone fallito: $rel ($src)"; printf '%s\n' "$out" >&2; return 0
     fi
+    mkdir -p "$path" && mv "$tmp/.git" "$path/.git" && rm -rf "$tmp"
+    # reset --hard tocca solo i tracciati: gli untracked gia' estratti restano,
+    # i tracciati modificati tornano dopo con repo-localfiles
+    git -C "$path" reset -q --hard >/dev/null 2>&1 || true
+    cloned=1
+    # il remote punterebbe al bundle in ~/.config/confsync/bundles, che il
+    # prossimo restore sostituisce: la repo deve restare senza remote
+    [ -n "$remote" ] || git -C "$path" remote remove origin >/dev/null 2>&1 || true
   else
     log "skip $rel (no remote, nessun bundle)"
     return 0
