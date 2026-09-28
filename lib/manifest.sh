@@ -86,3 +86,10 @@ SECRET_PATTERNS=( '.env' '.env.*' '*.key' '*.pem' '*secret*' '*token*' '*credent
                   '*.tfstate' '*.tfstate.*' '*.tfvars' '*.p12' '*.jks' 'kubeconfig*' )
 # Directory dove cercare repo git da manifestare
 REPO_SCAN_DIRS=( "$HOME/code" )
+# File/dir che non vanno MAI nel backup, anche dentro una repo: dipendenze,
+# output di build e cache rigenerabili. Regex estesa sul path relativo a HOME.
+IGNORED_JUNK_RE='(^|/)(node_modules|\.terraform|\.venv|venv|__pycache__|dist|build|target|\.next|\.nuxt|\.angular|coverage|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.gradle|vendor|\.cache|\.codegraph|worktrees|test-results|playwright-report|\.cxx|\.tmp|\.vite|binaries)(/|$)|\.(pyc|o|so|tsbuildinfo)$'
+# Sopra questa soglia (MiB) i file non entrano nel backup delle repo
+CONFSYNC_MAX_FILE_MB=${CONFSYNC_MAX_FILE_MB:-20}
+# Sotto-dir di REPO_SCAN_DIRS escluse dal backup dei file fuori repo (relative a HOME)
+CODE_EXCLUDE_DIRS=( 'code/saipem/old' 'code/custom/lib' )
