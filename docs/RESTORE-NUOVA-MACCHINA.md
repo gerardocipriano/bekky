@@ -1,5 +1,19 @@
 # Ripristino su macchina nuova (es. portatile Ubuntu)
 
+## Via breve (consigliata)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gerardocipriano/bekky/main/scripts/bootstrap.sh | bash
+cd ~/code/misc/bekky && ~/.local/bin/claude
+# a Claude: "siamo sul nuovo pc, prendi il backup e riconfigurami tutto come prima"
+```
+
+Il bootstrap chiede sudo, la passphrase e il login gcloud; Claude esegue
+[`RESTORE-PLAYBOOK.md`](RESTORE-PLAYBOOK.md): restore, pacchetti mappati da
+pacman ad apt, tool di sviluppo, unit, cron, verifica.
+
+## Via manuale
+
 Prerequisiti da procurarsi PRIMA (non stanno nel backup):
 1. **Passphrase confsync** (senza, gli archivi `.enc` sono irrecuperabili — tienila in un password manager)
 2. Accesso GCP con `gerardo.cipriano@dinova.one`
