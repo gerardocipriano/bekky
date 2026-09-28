@@ -37,10 +37,14 @@ else
   # shellcheck disable=SC2034
   CODE_EXCLUDE_DIRS=()
   REPO_SCAN_DIRS=("$HOME/code")
+  # shellcheck disable=SC2034
+  ETC_SCAN=( /etc/systemd/system /etc/modprobe.d /etc/profile.d /etc/sudoers.d )
 fi
 
 detect_distro() {
-  local f="${CONFSYNC_OS_RELEASE:-/etc/os-release}"
+  # CONFSYNC_ETC_ROOT permette di leggere un /etc finto (test inclusi): senza,
+  # la distro e l'inventario parlerebbero di due sistemi diversi.
+  local f="${CONFSYNC_OS_RELEASE:-${CONFSYNC_ETC_ROOT:-}/etc/os-release}"
   local id="" idlike=""
   if [ -r "$f" ]; then
     # shellcheck disable=SC1090
@@ -63,6 +67,232 @@ pkg_list_cmd() {
     fedora) echo "dnf repoquery --userinstalled --queryformat '%{name}'" ;;
     *)      echo "" ;;
   esac
+}
+
+# --- Inventario di sistema -------------------------------------------------
+# Ricostruire a mano pacchetti, estensioni e unit systemd costa tempo: qui si
+# fotografa lo stato. Tre regole per ogni comando: binario assente = salta in
+# silenzio, errore mai fatale, output ordinato e senza timestamp (BUNDLE.sha deve
+# cambiare solo quando cambia il sistema, altrimenti il dedup butta backup con
+# modifiche vere).
+
+# File singoli di /etc oltre alle dir di ETC_SCAN
+ETC_SCAN_FILES=( /etc/hosts /etc/environment )
+
+# Esegue i suoi argomenti solo se il binario esiste, ignorando l'errore
+_inv_run() {
+  local bin="$1"; shift
+  command -v "$bin" >/dev/null 2>&1 || return 0
+  "$bin" "$@" 2>/dev/null || true
+}
+
+# gcloud puo' restare appeso su reauth o rete: timeout, per non fermare il backup
+_inv_cap() { timeout 60 "$@" 2>/dev/null || true; }
+
+# Scrive in DEST l'output del comando $2 $3..., ripulito e ordinato
+_inv_capture() {
+  local dest="$1"; shift
+  local out
+  out="$("$@" 2>/dev/null || true)"
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out" | tr -d '\r' | sed 's/[[:space:]]*$//' | grep -v '^$' \
+    | LC_ALL=C sort -u > "$dest" || true
+  return 0
+}
+
+# Come _inv_capture ma passando il binario come primo argomento del comando:
+# se il binario manca salta in silenzio (lo fa _inv_run)
+_inv_cmd() {
+  local dest="$1" bin="$2"; shift 2
+  _inv_capture "$dest" _inv_run "$bin" "$@"
+}
+
+# Contenuto di un file, se leggibile
+_inv_cat() { [ -f "$1" ] || return 0; cat "$1" 2>/dev/null || true; }
+# Nomi delle voci di una dir, se esiste
+_inv_ls()  { [ -d "$1" ] || return 0; ls -1 "$1" 2>/dev/null || true; }
+
+# npm ls -g --json: jq se c'e', altrimenti parsing testuale (jq non e' una
+# dipendenza). Le voci npm link hanno gia' "version": "file:...", quindi
+# finiscono in elenco senza filtro.
+_inv_npm_global() {
+  local j out=''
+  command -v npm >/dev/null 2>&1 || return 0
+  j="$(npm ls -g --depth=0 --json 2>/dev/null || true)"
+  if [ -n "$j" ] && command -v jq >/dev/null 2>&1; then
+    out="$(jq -r '(.dependencies // {}) | to_entries[] | "\(.key) \(.value.version // "linked")"' \
+      <<<"$j" 2>/dev/null || true)"
+  fi
+  if [ -z "$out" ] && [ -n "$j" ]; then
+    # solo il blocco "dependencies" di primo livello, poi un pacchetto per riga
+    out="$(printf '%s' "$j" | tr -d '\n' \
+      | sed 's/^.*"dependencies"[[:space:]]*:[[:space:]]*{//; s/},/}\n/g' \
+      | sed -n 's/^[[:space:]]*"\([^"]*\)"[[:space:]]*:[[:space:]]*{.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1 \2/p')"
+  fi
+  if [ -z "$out" ]; then
+    # senza versioni: dal --parseable bastano i nomi sotto node_modules
+    out="$(npm ls -g --depth=0 --parseable 2>/dev/null | sed -n 's#.*/node_modules/##p' || true)"
+  fi
+  printf '%s\n' "$out"
+  return 0
+}
+
+# uv tool list e cargo install --list indentano i dettagli: solo le righe di
+# intestazione servono a reinstallare.
+_inv_uv_tool_list() { _inv_run uv tool list | grep -v '^[[:space:]]' || true; }
+_inv_cargo_list()   { _inv_run cargo install --list | grep -v '^[[:space:]]' || true; }
+# snap list: solo i nomi, senza intestazione
+_inv_snap_list()    { _inv_run snap list | tail -n +2 | awk '{print $1}' || true; }
+# systemctl list-unit-files: "unit.service enabled", serve le unit abilitate
+_inv_user_units()   { _inv_run systemctl --user list-unit-files --state=enabled --no-legend | awk '{print $1}' || true; }
+_inv_system_units() { _inv_run systemctl list-unit-files --state=enabled --no-legend | awk '{print $1}' || true; }
+_inv_groups()       { _inv_run id -Gn | tr ' ' '\n' || true; }
+# shell di login: campo 7 di /etc/passwd (l'ultimo nome e' quello valido)
+_inv_login_shell()  { getent passwd "${USER:-$(id -un)}" 2>/dev/null | cut -d: -f7 || true; }
+_inv_desktop()      { printf '%s\n' "${XDG_CURRENT_DESKTOP:-}"; }
+_inv_gcloud_comps() { command -v gcloud >/dev/null 2>&1 || return 0; _inv_cap gcloud components list --only-local-state --format='value(id)'; }
+# os-release: CONFSYNC_OS_RELEASE se dato, altrimenti dentro CONFSYNC_ETC_ROOT
+# (cosi' i test non leggono il /etc vero)
+_inv_os_release()   { _inv_cat "${CONFSYNC_OS_RELEASE:-${CONFSYNC_ETC_ROOT:-}/etc/os-release}"; }
+
+# Un file di /etc posseduto da un pacchetto torna reinstallando il pacchetto:
+# nell'inventario finiscono solo quelli scritti a mano (override, tuning).
+# Ritorna 0 se il file e' di un pacchetto. _inv_run qui non va bene:
+# maschera l'exit status, che e' l'informazione che serve.
+_etc_owned() {
+  case "$1" in
+    arch)   command -v pacman >/dev/null 2>&1 && pacman -Qo "$2" >/dev/null 2>&1 ;;
+    debian) command -v dpkg    >/dev/null 2>&1 && dpkg -S    "$2" >/dev/null 2>&1 ;;
+    *)      return 1 ;;
+  esac
+}
+
+# Copia in DEST/system/etc i file elencati in ETC_SCAN (dir) ed
+# ETC_SCAN_FILES (file singoli), mantenendo il path relativo a /etc.
+# Con CONFSYNC_ETC_ROOT si legge un /etc finto.
+_inv_copy_etc() {
+  local dest="$1" distro="$2" entry abs rel f
+  for entry in "${ETC_SCAN[@]}" "${ETC_SCAN_FILES[@]}"; do
+    [ -n "$entry" ] || continue
+    abs="${CONFSYNC_ETC_ROOT:-}$entry"
+    # il path /etc/... resta leggibile dentro l'archivio (system/etc/etc/hosts)
+    rel="${entry#/}"
+    if [ -d "$abs" ]; then
+      while IFS= read -r f; do
+        [ -r "$f" ] || continue
+        if _etc_owned "$distro" "$f"; then continue; fi
+        mkdir -p "$dest/system/etc/$rel/$(dirname "${f#"$abs"/}")" 2>/dev/null || true
+        cp -a --no-preserve=ownership "$f" "$dest/system/etc/$rel/${f#"$abs"/}" 2>/dev/null || true
+      done < <(find "$abs" -type f -print 2>/dev/null | LC_ALL=C sort)
+    elif [ -f "$abs" ] && [ ! -L "$abs" ] && [ -r "$abs" ]; then
+      # file singoli (hosts, environment): di un pacchetto ma editati a mano,
+      # e pacman -Qii non li segna MODIFIED. Si copiano sempre.
+      mkdir -p "$dest/system/etc/$(dirname "$rel")" 2>/dev/null || true
+      cp -a --no-preserve=ownership "$abs" "$dest/system/etc/$rel" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
+
+# Config utente di VSCode: .config/Code e' escluso dai dotfiles (pesa troppo),
+# ma settings/keybindings/mcp/snippets/prompts sono configurazione da salvare.
+_inv_vscode_user() {
+  local dest="$1" src="$HOME/.config/Code/User" item
+  for item in settings.json keybindings.json mcp.json chatLanguageModels.json snippets prompts; do
+    if [ -e "$src/$item" ]; then
+      mkdir -p "$dest/vscode/User" 2>/dev/null || true
+      cp -a --no-preserve=ownership "$src/$item" "$dest/vscode/User/" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
+
+# Una riga per file presente nell'inventario: cosa contiene, senza aprirlo
+_inv_readme() {
+  local dest="$1" path
+  {
+    printf '# Inventario di sistema (confsync): stato della macchina al backup.\n'
+    printf '# Documentazione, non configurazione attiva: va letto, non ripristinato.\n'
+    while IFS='|' read -r path desc; do
+      [ -n "$path" ] || continue
+      if [ -e "$dest/$path" ]; then printf '%s: %s\n' "$path" "$desc"; fi
+    done <<'EOF'
+packages/native.txt|pacchetti nativi installati a mano
+packages/aur.txt|pacchetti AUR (solo arch)
+packages/flatpak.txt|app flatpak
+packages/snap.txt|snap installati
+dev/npm-global.txt|package npm globali (nome + versione, link inclusi)
+dev/nvm-versions.txt|versioni node installate via nvm
+dev/nvm-default.txt|alias nvm di default
+dev/pipx.txt|ambienti pipx
+dev/uv-tools.txt|tool uv
+dev/go-bin.txt|binari in ~/go/bin
+dev/cargo.txt|tool cargo installati
+dev/krew.txt|plugin krew
+dev/gcloud-components.txt|componenti gcloud installati
+dev/helm-plugins.txt|plugin helm
+dev/pyenv-versions.txt|versioni pyenv
+vscode/extensions.txt|estensioni VSCode
+vscode/User|settings.json, keybindings.json, mcp.json, chatLanguageModels.json, snippets, prompts
+system/crontab.txt|crontab utente
+system/user-units-enabled.txt|unit systemd utente abilitate
+system/system-units-enabled.txt|unit systemd di sistema abilitate
+system/groups.txt|gruppi dell'utente
+system/shell.txt|shell di login
+system/desktop.txt|desktop in uso
+system/os-release|distro di origine
+system/nm-connections.txt|connessioni NetworkManager
+system/timezone.txt|fuso orario
+system/locale.txt|localectl status
+system/etc|file di /etc scritti a mano, path mantenuto (es. system/etc/etc/hosts)
+EOF
+  } > "$dest/README.txt"
+}
+
+collect_inventory() {
+  local dest="$1" distro; distro="$(detect_distro)"
+  # solo le dir dei file prodotti dai comandi; vscode/User e system/etc nascono
+  # se c'e' qualcosa da copiare, cosi' il README non promette voci vuote
+  mkdir -p "$dest/packages" "$dest/dev" "$dest/vscode" "$dest/system" 2>/dev/null || true
+
+  case "$distro" in
+    arch)   _inv_cmd "$dest/packages/native.txt" pacman -Qqen
+            _inv_cmd "$dest/packages/aur.txt"    pacman -Qqem ;;
+    debian) _inv_cmd "$dest/packages/native.txt" apt-mark showmanual ;;
+    fedora) _inv_cmd "$dest/packages/native.txt" dnf \
+              repoquery --userinstalled --queryformat '%{name}' ;;  # vedi pkg_list_cmd
+  esac
+  _inv_cmd "$dest/packages/flatpak.txt" flatpak list --app --columns=application
+  _inv_capture "$dest/packages/snap.txt" _inv_snap_list
+
+  _inv_capture "$dest/dev/npm-global.txt"      _inv_npm_global
+  _inv_capture "$dest/dev/nvm-versions.txt"    _inv_ls "$HOME/.nvm/versions/node"
+  _inv_capture "$dest/dev/nvm-default.txt"     _inv_cat "$HOME/.nvm/alias/default"
+  _inv_cmd     "$dest/dev/pipx.txt"            pipx list --short
+  _inv_capture "$dest/dev/uv-tools.txt"        _inv_uv_tool_list
+  _inv_capture "$dest/dev/go-bin.txt"          _inv_ls "$HOME/go/bin"
+  _inv_capture "$dest/dev/cargo.txt"           _inv_cargo_list
+  _inv_cmd     "$dest/dev/krew.txt"            kubectl krew list
+  _inv_capture "$dest/dev/gcloud-components.txt" _inv_gcloud_comps
+  _inv_cmd     "$dest/dev/helm-plugins.txt"    helm plugin list
+  _inv_cmd     "$dest/dev/pyenv-versions.txt"  pyenv versions --bare
+
+  _inv_cmd "$dest/vscode/extensions.txt" code --list-extensions
+  _inv_vscode_user "$dest"
+
+  _inv_cmd "$dest/system/crontab.txt"              crontab -l
+  _inv_capture "$dest/system/user-units-enabled.txt"   _inv_user_units
+  _inv_capture "$dest/system/system-units-enabled.txt" _inv_system_units
+  _inv_capture "$dest/system/groups.txt"           _inv_groups
+  _inv_capture "$dest/system/shell.txt"            _inv_login_shell
+  _inv_capture "$dest/system/desktop.txt"          _inv_desktop
+  _inv_capture "$dest/system/os-release"           _inv_os_release
+  _inv_cmd     "$dest/system/nm-connections.txt"  nmcli -t -f NAME,TYPE connection show
+  _inv_cmd     "$dest/system/timezone.txt"        timedatectl show -p Timezone --value
+  _inv_cmd     "$dest/system/locale.txt"          localectl status
+  _inv_copy_etc "$dest" "$distro"
+  _inv_readme "$dest"
+  return 0
 }
 
 require_deps() {
@@ -405,6 +635,15 @@ cmd_backup() {
   pack_encrypt "$bundstage"   "$work/repo-bundles.tar.enc"     .
   rm -rf "$secstage" "$localstage" "$bundstage"
 
+  # Inventario: foto dello stato (pacchetti, tool, unit, /etc scritto a
+  # mano). Nessun comando puo' farlo fallire, quindi un backup fatto su una
+  # macchina strana non si perde per questo.
+  log "inventario di sistema"
+  local invstage="$work/.inv"; mkdir -p "$invstage"
+  collect_inventory "$invstage"
+  pack_encrypt "$invstage" "$work/inventory.tar.enc" .
+  rm -rf "$invstage"
+
   log "lista pacchetti"
   local plc; plc="$(pkg_list_cmd)"
   if [ -n "$plc" ]; then eval "$plc" > "$work/packages.txt" 2>/dev/null || true; fi
@@ -426,8 +665,10 @@ cmd_backup() {
   # sono deterministici, i .enc no (salt casuale). Include anche i file in chiaro.
   ( cd "$work"
     cat ./*.contentsha 2>/dev/null
-    [ -f repos.manifest.json ] && sha256sum repos.manifest.json | awk '{print $1}'
-    [ -f packages.txt ]        && sha256sum packages.txt        | awk '{print $1}'
+    # if, non &&: su una distro non riconosciuta packages.txt non esiste e il
+    # backup deve comunque finire (la firma si calcola su quello che c'e')
+    if [ -f repos.manifest.json ]; then sha256sum repos.manifest.json | awk '{print $1}'; fi
+    if [ -f packages.txt ];         then sha256sum packages.txt         | awk '{print $1}'; fi
   ) | sort | sha256sum | awk '{print $1}' > "$work/BUNDLE.sha"
   rm -f "$work"/*.contentsha
 
@@ -482,7 +723,25 @@ cmd_restore() {
     log "secrets ripristinati (permessi 600)"
   fi
 
+  # L'inventario non e' configurazione attiva: e' documentazione dello stato
+  # della macchina di origine, quindi si estrae sempre (senza flag) in una dir
+  # dedicata, sostituendo quanto c'era. Serve al ripristino manuale.
+  if [ -f "$work/inventory.tar.enc" ]; then
+    local invdir="$HOME/.config/confsync/inventory"
+    rm -rf "$invdir"
+    decrypt_unpack "$work/inventory.tar.enc" "$invdir"
+    log "inventario estratto in $invdir"
+  fi
+
   if [ $do_repos -eq 1 ] && [ -f "$work/repos.manifest.json" ]; then
+    # I bundle servono al ripristino delle repo: si estraggono prima di
+    # qualunque operazione git, che li usa come sorgente dei commit locali.
+    if [ -f "$work/repo-bundles.tar.enc" ]; then
+      local bunddir="$HOME/.config/confsync/bundles"
+      rm -rf "$bunddir"
+      decrypt_unpack "$work/repo-bundles.tar.enc" "$bunddir"
+      log "bundle delle repo estratti in $bunddir"
+    fi
     local entry path remote branch
     grep -o '{[^}]*}' "$work/repos.manifest.json" | while read -r entry; do
       path="$(echo "$entry"  | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')"
