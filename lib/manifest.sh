@@ -93,3 +93,12 @@ IGNORED_JUNK_RE='(^|/)(node_modules|\.terraform|\.venv|venv|__pycache__|dist|bui
 CONFSYNC_MAX_FILE_MB=${CONFSYNC_MAX_FILE_MB:-20}
 # Sotto-dir di REPO_SCAN_DIRS escluse dal backup dei file fuori repo (relative a HOME)
 CODE_EXCLUDE_DIRS=( 'code/saipem/old' 'code/custom/lib' )
+# Dir di /etc fotografate nell'inventario (vedi _inv_copy_etc in confsync).
+# Solo i file NON posseduti da un pacchetto vengono copiati: il resto torna
+# reinstallando il pacchetto che li fornisce. Aggiungi qui le dir tue.
+ETC_SCAN=(
+  /etc/systemd/system /etc/modprobe.d /etc/udev/rules.d /etc/X11/xorg.conf.d
+  /etc/sysctl.d /etc/docker /etc/NetworkManager/conf.d
+  /etc/NetworkManager/dispatcher.d /etc/profile.d /etc/environment.d
+  /etc/security/limits.d /etc/modules-load.d /etc/tmpfiles.d /etc/sudoers.d
+)
