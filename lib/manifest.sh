@@ -31,6 +31,9 @@ INCLUDE_DOTFILES=(
   .m2/settings.xml .gsutil .krew/receipts .pyenv/version
   Documents Pictures Desktop Templates
 )
+# File di init della shell che il restore sovrascrive: l'originale locale va
+# in ~/.config/confsync/pre-restore/ (vedi cmd_restore)
+SHELL_INIT_FILES=( .profile .bash_profile .bashrc .zprofile .zshrc )
 # Pattern esclusi (glob su path tar), per evitare cache/spazzatura voluminosa.
 # Tengono il backup piccolo e veloce: cache browser/VSCode, log, crash dump, ecc.
 EXCLUDE_PATTERNS=(
@@ -48,6 +51,9 @@ EXCLUDE_PATTERNS=(
   '.understand-anything/repo' '.understand-anything-plugin' '.tokenjuice/artifacts'
   '.gemini/tmp' '.kilo/bin' '.qodo/bin' '.local/share/opencode/snapshot'
   '*/__pycache__/*' '*/.venv/*'
+  # Stato di confsync: config e passphrase sono della macchina (host tag),
+  # il resto (inventario, bundle, log del restore) e' rigenerato
+  '.config/confsync'
 )
 # App pesanti: stato/cache voluminoso e non portabile (no customizzazioni utili).
 # Escluse per tenere il backup piccolo/economico (vedi requisito costo minimo).

@@ -100,7 +100,13 @@ bekky restore --secrets      # + chiavi SSH/GPG (permessi 600)
 bekky restore --repos        # ri-clona le repo + file locali
 bekky restore --packages     # comando di reinstallazione pacchetti per la distro
 bekky restore --dry-run      # anteprima, non tocca nulla
+bekky restore --no-dotfiles --repos   # secondo passaggio: non annulla rehome e modifiche
+CONFSYNC_RESTORE_TS=<ts> bekky restore   # un backup diverso dall'ultimo
 ```
+
+Il restore non tocca `~/.config/confsync` (config e passphrase della macchina).
+I file di init della shell che sovrascrive (`.profile`, `.bashrc`, ...) restano
+in `~/.config/confsync/pre-restore/`.
 
 ---
 
@@ -168,6 +174,7 @@ Tutto in `~/.config/confsync/config` (vedi [`config.example`](config.example)):
 | `CONFSYNC_ACCOUNT` | account gcloud attivo | account per il provisioning |
 | `CONFSYNC_HOST_TAG` | `$(hostname)` | namespace del backup nel bucket |
 | `CONFSYNC_ZSTD_LEVEL` | `10` | livello di compressione zstd |
+| `CONFSYNC_RESTORE_TS` | contenuto di `latest` | timestamp del backup da ripristinare |
 
 **Cosa viene incluso/escluso** si regola in [`lib/manifest.sh`](lib/manifest.sh):
 `INCLUDE_DOTFILES`, `EXCLUDE_PATTERNS`, `SECRET_PATHS`, `SECRET_PATTERNS`, `REPO_SCAN_DIRS`.

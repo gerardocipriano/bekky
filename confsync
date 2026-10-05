@@ -112,11 +112,30 @@ _inv_cat() { [ -f "$1" ] || return 0; cat "$1" 2>/dev/null || true; }
 # Nomi delle voci di una dir, se esiste
 _inv_ls()  { [ -d "$1" ] || return 0; ls -1 "$1" 2>/dev/null || true; }
 
+# Dir bin della versione nvm di default (alias "22" -> la v22.x piu' alta),
+# vuoto se nvm non c'e'. Da cron il PATH non ha nvm: npm era quello di sistema,
+# e su Arch i suoi "globali" sono npm, node-gyp e semver dei pacchetti pacman,
+# non i tool installati con npm -g.
+_inv_nvm_bin() {
+  local nvm="${NVM_DIR:-$HOME/.nvm}" alias v
+  [ -d "$nvm/versions/node" ] || return 0
+  alias="$(cat "$nvm/alias/default" 2>/dev/null || true)"
+  alias="${alias#v}"
+  v="$(find "$nvm/versions/node" -mindepth 1 -maxdepth 1 -printf '%f\n' | grep -E "^v${alias//./\\.}(\.|$)" | sort -V | tail -1)"
+  # alias simbolici (node, lts/*): la versione piu' alta
+  [ -n "$v" ] || v="$(find "$nvm/versions/node" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort -V | tail -1)"
+  [ -n "$v" ] && [ -x "$nvm/versions/node/$v/bin/npm" ] && echo "$nvm/versions/node/$v/bin"
+  return 0
+}
+
 # npm ls -g --json: jq se c'e', altrimenti parsing testuale (jq non e' una
 # dipendenza). Le voci npm link hanno gia' "version": "file:...", quindi
 # finiscono in elenco senza filtro.
 _inv_npm_global() {
-  local j out=''
+  local j out='' nvmbin
+  nvmbin="$(_inv_nvm_bin)"
+  # npm di nvm prima di quello di sistema; node accanto, per lo shebang di npm
+  [ -z "$nvmbin" ] || local PATH="$nvmbin:$PATH"
   command -v npm >/dev/null 2>&1 || return 0
   j="$(npm ls -g --depth=0 --json 2>/dev/null || true)"
   if [ -n "$j" ] && command -v jq >/dev/null 2>&1; then
@@ -144,7 +163,10 @@ _inv_cargo_list()   { _inv_run cargo install --list | grep -v '^[[:space:]]' || 
 # snap list: solo i nomi, senza intestazione
 _inv_snap_list()    { _inv_run snap list | tail -n +2 | awk '{print $1}' || true; }
 # systemctl list-unit-files: "unit.service enabled", serve le unit abilitate
-_inv_user_units()   { _inv_run systemctl --user list-unit-files --state=enabled --no-legend | awk '{print $1}' || true; }
+# Unit utente abilitate = link nelle dir *.wants. systemctl --user da cron non
+# ha il bus della sessione e il file non veniva mai scritto; leggere il
+# filesystem da' lo stesso output da cron e a mano (dedup stabile).
+_inv_user_units()   { find "$HOME/.config/systemd/user" -mindepth 2 -maxdepth 2 -path '*.wants/*' -printf '%f\n' 2>/dev/null || true; }
 _inv_system_units() { _inv_run systemctl list-unit-files --state=enabled --no-legend | awk '{print $1}' || true; }
 _inv_groups()       { _inv_run id -Gn | tr ' ' '\n' || true; }
 # shell di login: campo 7 di /etc/passwd (l'ultimo nome e' quello valido)
@@ -326,6 +348,17 @@ get_passphrase() {
   local p; read -rsp "Passphrase confsync: " p >&2; printf '\n' >&2; printf '%s' "$p"
 }
 
+# Da chiamare una volta per comando, prima di cifrare o decifrare.
+# get_passphrase gira in una subshell per ogni archivio: senza
+# CONFSYNC_PASSPHRASE ogni archivio rifaceva op read o il prompt, e un op read
+# fallito a meta' o un prompt senza TTY (stringa vuota) cifravano archivi dello
+# stesso backup con chiavi diverse.
+resolve_passphrase() {
+  local p; p="$(get_passphrase)"
+  [ -n "$p" ] || die "passphrase vuota: imposta CONFSYNC_PASSPHRASE o sblocca 1Password"
+  CONFSYNC_PASSPHRASE="$p"; export CONFSYNC_PASSPHRASE
+}
+
 sha256_of() { sha256sum "$1" | awk '{print $1}'; }
 
 pack_encrypt() {
@@ -354,13 +387,14 @@ pack_encrypt() {
     | eval "$(_comp_cmd)" | sha256sum | awk '{print $1}' > "$out.contentsha"
 }
 
+# decrypt_unpack <archivio> <dest> [opzioni tar extra, es. --exclude=...]
 decrypt_unpack() {
-  local in="$1" dest="$2"
+  local in="$1" dest="$2"; shift 2
   local pass; pass="$(get_passphrase)"
   mkdir -p "$dest"
   openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass fd:3 -in "$in" 3<<<"$pass" \
     | eval "$(_decomp_cmd)" \
-    | tar -C "$dest" -xf -
+    | tar -C "$dest" "$@" -xf -
 }
 
 is_secret_path() {
@@ -555,10 +589,17 @@ gcs_upload() {
 
 gcs_fetch_latest() {
   local dest="$1"; mkdir -p "$dest"
-  local ts; ts="$(GSUTIL cat "$BUCKET/$HOSTNAME_TAG/latest" 2>/dev/null || true)"
+  # CONFSYNC_RESTORE_TS: ripristina un backup specifico invece di latest
+  # (es. latest con un archivio che non si decifra)
+  local ts="${CONFSYNC_RESTORE_TS:-}"
+  [ -n "$ts" ] || ts="$(GSUTIL cat "$BUCKET/$HOSTNAME_TAG/latest" 2>/dev/null || true)"
   [ -n "$ts" ] || die "nessun backup trovato per host $HOSTNAME_TAG"
-  GSUTIL -m cp -r "$BUCKET/$HOSTNAME_TAG/$ts/*" "$dest"/ >/dev/null 2>&1 \
-    || die "download del backup $ts fallito"
+  # la prima eccezione di gsutil dice il perche' (es. "No URLs matched" con
+  # l'host tag sbagliato): senza, l'errore era solo "download fallito"
+  local err
+  err="$(GSUTIL -m cp -r "$BUCKET/$HOSTNAME_TAG/$ts/*" "$dest"/ 2>&1 >/dev/null)" \
+    || die "download del backup $HOSTNAME_TAG/$ts fallito: $(printf '%s\n' "$err" \
+         | grep -m1 -E 'Exception|ERROR|denied' || printf '%s\n' "$err" | tail -1)"
   [ -f "$dest/MANIFEST.txt" ] || die "download incompleto: MANIFEST.txt assente"
   echo "$ts"
 }
@@ -574,7 +615,7 @@ verify_manifest() {
 }
 
 cmd_backup() {
-  require_deps; require_bucket
+  require_deps; require_bucket; resolve_passphrase
   local ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
   local work; work="${CONFSYNC_WORKDIR_KEEP:-$(mktemp -d)}"; mkdir -p "$work"
   # shellcheck disable=SC2064  # espansione immediata voluta: $work fuori scope all'EXIT
@@ -834,9 +875,10 @@ restore_repo() {
 
 cmd_restore() {
   require_deps; require_bucket
-  local do_secrets=0 do_repos=0 do_pkgs=0 dryrun=0 assume_yes=0
+  local do_secrets=0 do_repos=0 do_pkgs=0 do_dotfiles=1 dryrun=0 assume_yes=0
   while [ $# -gt 0 ]; do case "$1" in
     --secrets) do_secrets=1 ;; --repos) do_repos=1 ;; --packages) do_pkgs=1 ;;
+    --no-dotfiles) do_dotfiles=0 ;;
     --dry-run) dryrun=1 ;; --yes) assume_yes=1 ;; *) die "flag sconosciuta: $1" ;;
   esac; shift; done
 
@@ -852,11 +894,34 @@ cmd_restore() {
   if [ $dryrun -eq 1 ]; then
     log "[dry-run] estrarrei dotfiles in $HOME; artefatti: $(ls "$work")"; return 0
   fi
-  if [ $assume_yes -eq 0 ]; then
-    read -rp "Sovrascrivo i dotfiles in $HOME? [y/N] " a; [ "$a" = y ] || die "annullato"
+  resolve_passphrase
+  # --no-dotfiles: per un secondo passaggio (es. --repos dopo SSH) che non
+  # deve annullare rehome e modifiche fatte dopo il primo restore
+  if [ $do_dotfiles -eq 1 ]; then
+    if [ $assume_yes -eq 0 ]; then
+      read -rp "Sovrascrivo i dotfiles in $HOME? [y/N] " a; [ "$a" = y ] || die "annullato"
+    fi
+    # I file di init della distro nuova (il .profile di Ubuntu mette
+    # ~/.local/bin nel PATH) vengono sovrascritti da quelli della vecchia: si
+    # conserva il primo originale in pre-restore/ e si avvisa se cambiano.
+    local pre="$HOME/.config/confsync/pre-restore" f changed=()
+    mkdir -p "$pre"
+    for f in "${SHELL_INIT_FILES[@]}"; do
+      [ -f "$HOME/$f" ] && [ ! -e "$pre/$f" ] && cp -a "$HOME/$f" "$pre/$f"
+    done
+    # .config/confsync escluso anche qui: i backup vecchi lo contengono, e
+    # sovrascriveva config e passphrase locali (host tag del restore perso)
+    [ -f "$work/dotfiles.tar.enc" ] && decrypt_unpack "$work/dotfiles.tar.enc" "$HOME" \
+      --exclude=.config/confsync
+    log "dotfiles ripristinati"
+    for f in "${SHELL_INIT_FILES[@]}"; do
+      [ -f "$pre/$f" ] && ! cmp -s "$pre/$f" "$HOME/$f" && changed+=("$f")
+    done
+    if [ ${#changed[@]} -gt 0 ]; then
+      log "ATTENZIONE: sovrascritti ${changed[*]} (originali in $pre)"
+      log "controlla che il PATH abbia ancora ~/.local/bin e gli altri path della distro"
+    fi
   fi
-  [ -f "$work/dotfiles.tar.enc" ] && decrypt_unpack "$work/dotfiles.tar.enc" "$HOME"
-  log "dotfiles ripristinati"
   # Conservato per scripts/rehome.sh: il work dir è temporaneo.
   if [ -f "$work/origin.home" ]; then
     mkdir -p "$HOME/.config/confsync"
@@ -941,7 +1006,7 @@ cmd_list() {
 }
 
 cmd_diff() {
-  require_deps; require_bucket
+  require_deps; require_bucket; resolve_passphrase
   local work; work="$(mktemp -d)"
   # shellcheck disable=SC2064  # espansione immediata voluta: $work fuori scope all'EXIT
   trap "rm -rf '$work'" EXIT
@@ -957,7 +1022,7 @@ cmd_diff() {
 usage() { cat >&2 <<EOF
 confsync — backup/restore cifrato delle config OS
   confsync backup
-  confsync restore [--secrets] [--repos] [--packages] [--dry-run]
+  confsync restore [--secrets] [--repos] [--packages] [--no-dotfiles] [--dry-run]
   confsync list
   confsync diff
 EOF

@@ -39,7 +39,19 @@ L=~/.config/confsync/new-login
 cp -a "$L/.credentials.json" ~/.claude/.credentials.json
 jq --slurpfile n "$L/.claude.json" '.oauthAccount = $n[0].oauthAccount | .userID = $n[0].userID' \
   ~/.claude.json > ~/.claude.json.new && mv ~/.claude.json.new ~/.claude.json
+rm -rf "$L"   # copia delle credenziali: non lasciarla in giro
 ```
+
+Se un archivio non si decifra (`bad decrypt`, o `zstd: unsupported format`) ma
+gli altri sì, quel backup è stato cifrato con passphrase diverse (bug corretto,
+ma i backup vecchi restano così). Prova il precedente:
+`gsutil ls $CONFSYNC_BUCKET/<host>/`, poi `CONFSYNC_RESTORE_TS=<timestamp>`
+davanti a ogni comando `confsync restore` di questo playbook.
+
+Il restore non tocca più `~/.config/confsync` (config, passphrase, host tag).
+I file di init della shell sovrascritti (`.profile`, `.bashrc`, ...) restano in
+`~/.config/confsync/pre-restore/`: se il log li segnala, rimetti nel PATH quello
+che aggiungevano gli originali (su Ubuntu `.profile` aggiunge `~/.local/bin`).
 
 Le repo si ripristinano in fase 3: le chiavi SSH stanno nell'agent di
 1Password, prima non c'è modo di clonare. Controlla il log: nessun `ERRORE`.
@@ -47,7 +59,9 @@ L'inventario del vecchio sistema ora sta in
 `~/.config/confsync/inventory/` (leggi il suo `README.txt`). Da qui in poi è la
 fonte di verità per cosa installare.
 
-Se `origin.home` è diverso da `$HOME`: `./scripts/rehome.sh --apply` subito.
+Se `origin.home` è diverso da `$HOME`: `./scripts/rehome.sh --apply` subito
+(riscrive anche i symlink). Rilancialo dopo ogni `restore --repos`, che
+riestrae l'inventario.
 
 ## Fase 2: tool da cui dipende Claude Code
 
@@ -65,21 +79,31 @@ nvm), `rtk` e `node`. Installali prima di tutto il resto:
    `inventory/dev/uv-tools.txt` con `uv tool install`.
 5. Controllo: `jq -r '..|.command? // empty' ~/.claude/settings.json` e verifica
    che ogni eseguibile citato esista.
+6. Gli hook girano con `/bin/sh` e il PATH del processo `claude`, che spesso non
+   ha nvm (il `.bashrc` di Manjaro non lo carica). Serve `node` nel PATH di
+   sistema: `sudo ln -sfn ~/.nvm/versions/node/<default>/bin/node /usr/local/bin/node`.
 
 ## Fase 3: 1Password e SSH
 
 1. Repo apt di 1Password (https://support.1password.com/install-linux/#debian-or-ubuntu),
-   pacchetti `1password` e `1password-cli`.
+   pacchetti `1password` e `1password-cli`. Se c'è anche lo snap
+   (`snap list 1password`), l'utente deve usare l'app apt (`/usr/bin/1password`):
+   nello snap l'opzione dell'agent SSH è disattivata.
 2. Chiedi all'utente, in un unico messaggio: aprire 1Password, fare login,
    attivare Settings -> Developer -> "Integrate with CLI" e "Use the SSH agent".
    È l'unico passo con la GUI. Aspetta la conferma.
-3. `ssh -T git@github.com` e `ssh -T git@gitlab.com` devono rispondere.
+3. `ssh -T git@github.com` e `ssh -T git@gitlab.com` devono rispondere. Prima del
+   restore aggiungi a `known_hosts` anche bitbucket.org e ssh.dev.azure.com
+   (`ssh-keyscan`): con `BatchMode` un host sconosciuto fa fallire il clone.
 4. Restore delle repo (~339 clone, 20-40 minuti, in background con log):
-   `./confsync restore --yes --repos > ~/.config/confsync/restore-logs/repos.log 2>&1`.
+   `./confsync restore --yes --no-dotfiles --repos > ~/.config/confsync/restore-logs/repos.log 2>&1`.
    Ricrea anche commit non pushati, branch locali e stash dai bundle.
    Idempotente: se qualche clone fallisce, sistema la causa e rilancialo.
 5. Controllo: `grep -c 'clone fallito' ~/.config/confsync/restore-logs/repos.log`
-   deve dare 0, oppure elenca le repo rimaste in "Da sistemare".
+   deve dare 0, oppure elenca le repo rimaste in "Da sistemare". Se `ssh-add -l`
+   mostra poche chiavi, quelle che mancano stanno in vault che l'agent di
+   1Password non espone di default (`~/.config/1Password/ssh/agent.toml`): è
+   un passo dell'utente.
 6. Se 1Password chiede di autorizzare ogni processo che usa l'agent, chiedi
    all'utente di scegliere "Approve for all applications" alla prima richiesta.
 
@@ -95,8 +119,14 @@ Nativi. Per ogni nome:
   repo apt di helm, `github-cli` -> `gh`, `nodejs`/`npm` -> salta (usa nvm);
 - salta: kernel, firmware, driver, `manjaro-*`, `pamac*`, `mhwd*`, `lib32-*`,
   base/base-devel (-> `build-essential`), pacchetti già presenti.
-Installa in blocchi con `apt-get install -y --no-install-recommends` e, se un
-blocco fallisce, un pacchetto alla volta per isolare il colpevole.
+Installa in blocchi e, se un blocco fallisce, un pacchetto alla volta per
+isolare il colpevole. `sudo` non passa `DEBIAN_FRONTEND` dall'ambiente: senza
+metterlo nel comando, un conffile modificato (es. `sshd_config`) apre un prompt
+whiptail e apt resta fermo:
+`sudo DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confold install -y --no-install-recommends ...`.
+Durante l'install metti un `/usr/sbin/policy-rc.d` con `exit 101`, così
+postgresql, samba, sshd e simili non partono da soli (le unit le decide la
+fase 6). Toglilo alla fine.
 
 AUR, fonti ufficiali dei vendor:
 | AUR | Ubuntu |
@@ -104,14 +134,14 @@ AUR, fonti ufficiali dei vendor:
 | 1password, 1password-cli | fase 3 |
 | google-chrome | .deb da dl.google.com |
 | visual-studio-code-bin | repo apt Microsoft (`code`) |
-| spotify | repo apt Spotify |
+| spotify | snap `spotify` (la chiave del repo apt cambia spesso) |
 | webex-bin | .deb da webex.com |
 | forticlient-vpn | repo apt Fortinet (`forticlient`) |
-| cloud-sql-proxy | componente gcloud o binario da GitHub release |
+| cloud-sql-proxy | binario da `storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/<tag>/cloud-sql-proxy.linux.amd64` (le release GitHub non hanno asset) |
 | kubecolor, terraform-docs, tfswitch | binari da GitHub release in `~/.local/bin` |
 | tauri-cli | `cargo install tauri-cli` |
 | masterpdfeditor-free | .deb da code-industry.net |
-| rambox-pro-bin | .deb/AppImage da rambox.app |
+| rambox-pro-bin | .deb dalle release GitHub `ramboxapp/download` |
 | jmeter | tarball Apache in `~/tools` |
 | oh-my-zsh-git | installer ufficiale oh-my-zsh con `KEEP_ZSHRC=yes RUNZSH=no`; la custom è già ripristinata |
 | neofetch | `fastfetch` o `neofetch` da apt |
@@ -157,14 +187,27 @@ okular, spectacle, ark, ...).
   Poi `sudo systemctl daemon-reload` e `sudo udevadm control --reload`.
   Salta i symlink `*.wants/*` (li crea `systemctl enable`).
 - Unit di sistema: abilita quelle di `system-units-enabled.txt` che esistono
-  qui (`cronie` -> `cron`, `sddm` -> salta, `paccache`/`pamac*`/`pacman-*` -> salta).
+  qui (`cronie` -> `cron`, `sddm` -> salta, `paccache`/`pamac*`/`pacman-*` -> salta,
+  `systemd-timesyncd` -> su Ubuntu c'è chrony).
+  `agentmemory.service` non ha `User=`: gira come root e scrive file di root in
+  `~/.npm` e `~/.agentmemory`. Aggiungi un drop-in
+  `/etc/systemd/system/agentmemory.service.d/user.conf` con `User=`, `Group=` e
+  `WorkingDirectory=$HOME/.agentmemory` (scrive `data/` relativo alla cwd).
 - Unit utente: `inventory/system/user-units-enabled.txt`. Prima esegui
   `./scripts/post-restore.sh` per vedere quali ExecStart mancano. Ricrea il
   necessario (venv, binari), poi `systemctl --user enable --now`.
   Hermes: `~/.hermes/hermes-agent` e il venv sono esclusi dal backup; config,
-  memorie, sessioni e db sono ripristinati. Reinstalla con
-  `curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`
-  (lo stesso usato sul vecchio PC) e verifica che non sovrascriva `config.yaml`.
+  memorie, sessioni e db sono ripristinati. Salva una copia di
+  `~/.hermes/config.yaml`, scarica l'installer
+  (`https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh`)
+  e lancialo con `bash install.sh --non-interactive < /dev/null`: può modificare
+  `config.yaml`, rimetti la copia. Il layout nuovo non ha più `venv/`: il
+  binario è `~/.hermes/hermes-agent/.hermes/bin/hermes`. Ripunta lì
+  `~/.local/bin/hermes` e cambia l'ExecStart di `hermes-gateway.service` in
+  `%h/.local/bin/hermes gateway run --replace`.
+  Repo con `dist/` non versionato (es. `~/code/misc/pixel-agents`): `npm ci && npm run build`.
+  `~/.understand-anything/repo` è escluso dal backup ma le skill `understand-*`
+  ci puntano: reinstallalo o le skill restano link rotti.
 - crontab: `crontab inventory/system/crontab.txt`, dopo aver riscritto il
   vecchio HOME se cambiato. Il job di bekky deve esserci; togli la riga
   marcata `bekky-migrazione` (backup giornaliero temporaneo del vecchio PC).

@@ -525,3 +525,184 @@ nuovo" ]
   [ "$(cat "$newrepo/tracked.txt")" = "dal-backup" ]
   [ ! -e "$newrepo.bekky-clone" ]
 }
+
+@test "backup senza CONFSYNC_PASSPHRASE: una sola passphrase per tutti gli archivi" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"; mkdir -p "$fakehome/.ssh"
+  echo "alias x=y" > "$fakehome/.zshrc"; echo "PRIVATE" > "$fakehome/.ssh/id_rsa"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  # op che a ogni chiamata restituisce una passphrase diversa (p1, p2, ...)
+  cat > "$fakebin/op" <<OPEOF
+#!/usr/bin/env bash
+n=\$(( \$(cat "$tmp/opcount" 2>/dev/null || echo 0) + 1 )); echo \$n > "$tmp/opcount"; echo "p\$n"
+OPEOF
+  chmod +x "$fakebin/op"
+  run env -u CONFSYNC_PASSPHRASE HOME="$fakehome" CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" CONFSYNC_WORKDIR_KEEP="$tmp/work" bash "$CONFSYNC" backup </dev/null
+  [ "$status" -eq 0 ]
+  [ "$(cat "$tmp/opcount")" = "1" ]
+  for a in dotfiles secrets inventory; do
+    [ -f "$tmp/work/$a.tar.enc" ] || continue
+    run env CONFSYNC_PASSPHRASE=p1 bash -c \
+      'source "$0" --source-only; decrypt_unpack "$1" "$2"' "$CONFSYNC" "$tmp/work/$a.tar.enc" "$tmp/ext-$a"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "backup con passphrase vuota si ferma prima di cifrare" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"; mkdir -p "$fakehome"; echo x > "$fakehome/.zshrc"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  printf '#!/bin/sh\nexit 1\n' > "$fakebin/op"; chmod +x "$fakebin/op"
+  run env -u CONFSYNC_PASSPHRASE HOME="$fakehome" CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" CONFSYNC_WORKDIR_KEEP="$tmp/work" bash "$CONFSYNC" backup </dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"passphrase vuota"* ]]
+  [ ! -f "$tmp/work/dotfiles.tar.enc" ]
+}
+
+@test "npm globali: usa l'npm della versione nvm di default, non quello di sistema" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"
+  for v in v20.1.0 v22.3.0 v22.10.0; do
+    mkdir -p "$fakehome/.nvm/versions/node/$v/bin"
+    printf '#!/bin/sh\necho %s\n' "'{\"dependencies\":{\"tool-$v\":{\"version\":\"1.0.0\"}}}'" \
+      > "$fakehome/.nvm/versions/node/$v/bin/npm"
+    chmod +x "$fakehome/.nvm/versions/node/$v/bin/npm"
+  done
+  mkdir -p "$fakehome/.nvm/alias"; echo 22 > "$fakehome/.nvm/alias/default"
+  # npm "di sistema" nel PATH, come da cron
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"
+  printf '#!/bin/sh\necho %s\n' "'{\"dependencies\":{\"node-gyp\":{\"version\":\"13.0.2\"}}}'" > "$fakebin/npm"
+  chmod +x "$fakebin/npm"
+  run env -u NVM_DIR HOME="$fakehome" PATH="$fakebin:$PATH" bash -c \
+    'source "$0" --source-only; _inv_npm_global' "$CONFSYNC"
+  [ "$status" -eq 0 ]
+  [ "$output" = "tool-v22.10.0 1.0.0" ]
+}
+
+@test "unit utente abilitate lette dalle dir .wants, anche senza systemctl" {
+  tmp="$(mktemp -d)"; u="$tmp/home/.config/systemd/user"
+  mkdir -p "$u/default.target.wants" "$u/timers.target.wants"
+  touch "$u/a.service" "$u/b.timer" "$u/disabled.service"
+  ln -s ../a.service "$u/default.target.wants/a.service"
+  ln -s ../b.timer "$u/timers.target.wants/b.timer"
+  run env HOME="$tmp/home" PATH="/usr/bin:/bin" bash -c \
+    'source "$0" --source-only; _inv_capture "$1" _inv_user_units; cat "$1"' "$CONFSYNC" "$tmp/out.txt"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'a.service\nb.timer')" ]
+}
+
+@test ".config/confsync fuori dai dotfiles: il backup non lo salva" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"; mkdir -p "$fakehome/.config/confsync" "$fakehome/.config/app"
+  echo 'export CONFSYNC_HOST_TAG="vecchio"' > "$fakehome/.config/confsync/config"
+  echo "a=1" > "$fakehome/.config/app/conf"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$fakebin:$PATH" CONFSYNC_WORKDIR_KEEP="$tmp/work" bash "$CONFSYNC" backup
+  env CONFSYNC_PASSPHRASE=tp bash -c 'source "$0" --source-only; decrypt_unpack "$1" "$2"' \
+      "$CONFSYNC" "$tmp/work/dotfiles.tar.enc" "$tmp/ext"
+  [ "$(cat "$tmp/ext/.config/app/conf")" = "a=1" ]
+  [ ! -e "$tmp/ext/.config/confsync" ]
+}
+
+@test "restore di un backup vecchio con .config/confsync non sovrascrive la config locale" {
+  tmp="$(mktemp -d)"; old="$tmp/old"; mkdir -p "$old/.config/confsync"
+  echo "# VECCHIA" > "$old/.config/confsync/config"; echo "alias x=y" > "$old/.zshrc"
+  # archivio dotfiles "vecchio stile", costruito a mano con .config/confsync dentro
+  export FAKE_BUCKET_DIR="$tmp/bucket"; d="$FAKE_BUCKET_DIR/myhost/20260101T000000Z"; mkdir -p "$d"
+  tar -C "$old" -cf - .zshrc .config | zstd -q | openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt \
+      -pass pass:tp -out "$d/dotfiles.tar.enc"
+  ( cd "$d" && sha256sum dotfiles.tar.enc > MANIFEST.txt )
+  echo 20260101T000000Z > "$FAKE_BUCKET_DIR/myhost/latest"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  newhome="$tmp/new"; mkdir -p "$newhome/.config/confsync"; echo "# NUOVA" > "$newhome/.config/confsync/config"
+  run env HOME="$newhome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket CONFSYNC_HOST_TAG=myhost \
+      PATH="$fakebin:$PATH" bash "$CONFSYNC" restore --yes
+  [ "$status" -eq 0 ]
+  [ "$(cat "$newhome/.zshrc")" = "alias x=y" ]
+  [ "$(cat "$newhome/.config/confsync/config")" = "# NUOVA" ]
+}
+
+@test "rehome.sh --apply riscrive file e symlink che puntano al vecchio HOME" {
+  tmp="$(mktemp -d)"; h="$tmp/nuovo"; old="/home/vecchio"
+  mkdir -p "$h/.config/confsync" "$h/bin" "$h/.claude/skills" "$h/.tool/v1"
+  echo "$old" > "$h/.config/confsync/origin.home"
+  echo "path=$old/.tool" > "$h/.zshrc"
+  touch "$h/.tool/v1/terraform"
+  ln -s "$old/.tool/v1/terraform" "$h/bin/terraform"
+  ln -s "$old/.tool/v1" "$h/.claude/skills/mia-skill"
+  ln -s "/opt/altro" "$h/bin/esterno"
+  run env HOME="$h" bash "$BATS_TEST_DIRNAME/../scripts/rehome.sh" --apply
+  [ "$status" -eq 0 ]
+  [ "$(cat "$h/.zshrc")" = "path=$h/.tool" ]
+  [ "$(readlink "$h/bin/terraform")" = "$h/.tool/v1/terraform" ]
+  [ "$(readlink "$h/.claude/skills/mia-skill")" = "$h/.tool/v1" ]
+  [ "$(readlink "$h/bin/esterno")" = "/opt/altro" ]
+}
+
+@test "restore conserva i file di init della shell locali e avvisa se li sovrascrive" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"; mkdir -p "$fakehome"
+  echo "# profile vecchio" > "$fakehome/.profile"; echo "alias x=y" > "$fakehome/.zshrc"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket PATH="$fakebin:$PATH" bash "$CONFSYNC" backup
+  newhome="$tmp/new"; mkdir -p "$newhome"; echo 'PATH="$HOME/.local/bin:$PATH"' > "$newhome/.profile"
+  run env HOME="$newhome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket PATH="$fakebin:$PATH" \
+      bash "$CONFSYNC" restore --yes
+  [ "$status" -eq 0 ]
+  [ "$(cat "$newhome/.profile")" = "# profile vecchio" ]
+  [ "$(cat "$newhome/.config/confsync/pre-restore/.profile")" = 'PATH="$HOME/.local/bin:$PATH"' ]
+  [[ "$output" == *"sovrascritti .profile"* ]]
+  # .zshrc non c'era: nessun avviso
+  [[ "$output" != *".zshrc"* ]]
+}
+
+@test "download fallito: l'errore riporta host tag e causa di gsutil" {
+  tmp="$(mktemp -d)"; fakebin="$tmp/bin"; mkdir -p "$fakebin" "$tmp/home"
+  cat > "$fakebin/gsutil" <<'GSEOF'
+#!/usr/bin/env bash
+[ "$1" = "-m" ] && shift
+case "$1" in
+  cat) echo 20260101T000000Z ;;
+  cp)  echo "CommandException: No URLs matched: gs://b/altro-host/20260101T000000Z/*" >&2
+       echo "CommandException: 1 file/object could not be transferred." >&2; exit 1 ;;
+esac
+GSEOF
+  chmod +x "$fakebin/gsutil"
+  run env HOME="$tmp/home" CONFSYNC_BUCKET=gs://b CONFSYNC_HOST_TAG=altro-host PATH="$fakebin:$PATH" \
+      bash "$CONFSYNC" restore --dry-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"altro-host/20260101T000000Z fallito: CommandException: No URLs matched"* ]]
+}
+
+@test "CONFSYNC_RESTORE_TS ripristina un backup diverso da latest" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"; mkdir -p "$fakehome"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  echo "alias v=1" > "$fakehome/.zshrc"
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket CONFSYNC_HOST_TAG=h \
+      PATH="$fakebin:$PATH" bash "$CONFSYNC" backup
+  first="$(cat "$FAKE_BUCKET_DIR/h/latest")"; sleep 1
+  echo "alias v=2" > "$fakehome/.zshrc"
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket CONFSYNC_HOST_TAG=h \
+      PATH="$fakebin:$PATH" bash "$CONFSYNC" backup
+  [ "$(cat "$FAKE_BUCKET_DIR/h/latest")" != "$first" ]
+  newhome="$tmp/new"; mkdir -p "$newhome"
+  run env HOME="$newhome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket CONFSYNC_HOST_TAG=h \
+      CONFSYNC_RESTORE_TS="$first" PATH="$fakebin:$PATH" bash "$CONFSYNC" restore --yes
+  [ "$status" -eq 0 ]
+  [ "$(cat "$newhome/.zshrc")" = "alias v=1" ]
+}
+
+@test "restore --no-dotfiles non tocca i dotfiles locali" {
+  tmp="$(mktemp -d)"; fakehome="$tmp/home"; mkdir -p "$fakehome"; echo "alias x=backup" > "$fakehome/.zshrc"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  fakebin="$tmp/bin"; mkdir -p "$fakebin"; make_fs_gsutil "$fakebin" "$FAKE_BUCKET_DIR"
+  env HOME="$fakehome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket PATH="$fakebin:$PATH" bash "$CONFSYNC" backup
+  newhome="$tmp/new"; mkdir -p "$newhome"; echo "alias x=locale" > "$newhome/.zshrc"
+  run env HOME="$newhome" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket PATH="$fakebin:$PATH" \
+      bash "$CONFSYNC" restore --yes --no-dotfiles
+  [ "$status" -eq 0 ]
+  [ "$(cat "$newhome/.zshrc")" = "alias x=locale" ]
+}

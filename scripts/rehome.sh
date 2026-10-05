@@ -53,6 +53,21 @@ for f in "${targets[@]}"; do
   fi
 done
 
+# Symlink con target assoluto nel vecchio HOME (skill di Claude e Hermes,
+# ~/bin/terraform, ~/.local/bin/*): grep non li vede, vanno riscritti a parte.
+mapfile -t links < <(
+  for r in "${ROOTS[@]}"; do
+    [ -e "$HOME/$r" ] || [ -L "$HOME/$r" ] || continue
+    find "$HOME/$r" \( -lname "$OLD" -o -lname "$OLD/*" \) -print 2>/dev/null
+  done | sort -u
+)
+[ "${#links[@]}" -eq 0 ] || echo "symlink verso $OLD: ${#links[@]}"
+for l in "${links[@]}"; do
+  t="$(readlink "$l")"; nt="$HOME${t#"$OLD"}"
+  printf '  link %s -> %s\n' "${l#"$HOME"/}" "$nt"
+  [ "$APPLY" -eq 1 ] && ln -sfn "$nt" "$l"
+done
+
 # Claude Code tiene memoria e sessioni in ~/.claude/projects/<cwd codificata>:
 # con un altro HOME le directory vanno rinominate o la memoria non si aggancia.
 enc() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }

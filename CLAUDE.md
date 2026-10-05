@@ -24,3 +24,10 @@ lanciato il bootstrap: digli di eseguire
   timestamp), altrimenti il dedup via `BUNDLE.sha` non scatta mai.
 - gsutil da cron fallisce con `ReauthUnattendedError` quando scade il reauth
   Workspace: serve un `gcloud auth login` interattivo.
+- `get_passphrase` gira in una subshell per ogni archivio: va risolta una volta
+  per comando (`resolve_passphrase`), altrimenti un `op read` fallito a metà
+  cifra archivi dello stesso backup con chiavi diverse.
+- Da cron il PATH è ridotto e non c'è il bus utente: per l'inventario niente
+  `npm`/`systemctl --user` presi dal PATH, si leggono nvm e i file su disco.
+- `~/.config/confsync` è stato della macchina (host tag, passphrase): mai nei
+  dotfiles né sovrascritto dal restore.
