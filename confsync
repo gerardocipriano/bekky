@@ -29,11 +29,22 @@ else
   EXCLUDE_PATTERNS=('*/Cache/*' '*.log' '*/.git/*' '*/node_modules/*')
   SECRET_PATHS=(.ssh .gnupg .netrc)
   SECRET_PATTERNS=('.env' '*.key' '*.pem' '*secret*' '*token*')
+  # shellcheck disable=SC2034
+  DOTFILES_ONLY_EXCLUDES=()
+  # shellcheck disable=SC2034
+  IGNORED_JUNK_RE=''
+  CONFSYNC_MAX_FILE_MB=20
+  # shellcheck disable=SC2034
+  CODE_EXCLUDE_DIRS=()
   REPO_SCAN_DIRS=("$HOME/code")
+  # shellcheck disable=SC2034
+  ETC_SCAN=( /etc/systemd/system /etc/modprobe.d /etc/profile.d /etc/sudoers.d )
 fi
 
 detect_distro() {
-  local f="${CONFSYNC_OS_RELEASE:-/etc/os-release}"
+  # CONFSYNC_ETC_ROOT permette di leggere un /etc finto (test inclusi): senza,
+  # la distro e l'inventario parlerebbero di due sistemi diversi.
+  local f="${CONFSYNC_OS_RELEASE:-${CONFSYNC_ETC_ROOT:-}/etc/os-release}"
   local id="" idlike=""
   if [ -r "$f" ]; then
     # shellcheck disable=SC1090
@@ -56,6 +67,232 @@ pkg_list_cmd() {
     fedora) echo "dnf repoquery --userinstalled --queryformat '%{name}'" ;;
     *)      echo "" ;;
   esac
+}
+
+# --- Inventario di sistema -------------------------------------------------
+# Ricostruire a mano pacchetti, estensioni e unit systemd costa tempo: qui si
+# fotografa lo stato. Tre regole per ogni comando: binario assente = salta in
+# silenzio, errore mai fatale, output ordinato e senza timestamp (BUNDLE.sha deve
+# cambiare solo quando cambia il sistema, altrimenti il dedup butta backup con
+# modifiche vere).
+
+# File singoli di /etc oltre alle dir di ETC_SCAN
+ETC_SCAN_FILES=( /etc/hosts /etc/environment )
+
+# Esegue i suoi argomenti solo se il binario esiste, ignorando l'errore
+_inv_run() {
+  local bin="$1"; shift
+  command -v "$bin" >/dev/null 2>&1 || return 0
+  "$bin" "$@" 2>/dev/null || true
+}
+
+# gcloud puo' restare appeso su reauth o rete: timeout, per non fermare il backup
+_inv_cap() { timeout 60 "$@" 2>/dev/null || true; }
+
+# Scrive in DEST l'output del comando $2 $3..., ripulito e ordinato
+_inv_capture() {
+  local dest="$1"; shift
+  local out
+  out="$("$@" 2>/dev/null || true)"
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out" | tr -d '\r' | sed 's/[[:space:]]*$//' | grep -v '^$' \
+    | LC_ALL=C sort -u > "$dest" || true
+  return 0
+}
+
+# Come _inv_capture ma passando il binario come primo argomento del comando:
+# se il binario manca salta in silenzio (lo fa _inv_run)
+_inv_cmd() {
+  local dest="$1" bin="$2"; shift 2
+  _inv_capture "$dest" _inv_run "$bin" "$@"
+}
+
+# Contenuto di un file, se leggibile
+_inv_cat() { [ -f "$1" ] || return 0; cat "$1" 2>/dev/null || true; }
+# Nomi delle voci di una dir, se esiste
+_inv_ls()  { [ -d "$1" ] || return 0; ls -1 "$1" 2>/dev/null || true; }
+
+# npm ls -g --json: jq se c'e', altrimenti parsing testuale (jq non e' una
+# dipendenza). Le voci npm link hanno gia' "version": "file:...", quindi
+# finiscono in elenco senza filtro.
+_inv_npm_global() {
+  local j out=''
+  command -v npm >/dev/null 2>&1 || return 0
+  j="$(npm ls -g --depth=0 --json 2>/dev/null || true)"
+  if [ -n "$j" ] && command -v jq >/dev/null 2>&1; then
+    out="$(jq -r '(.dependencies // {}) | to_entries[] | "\(.key) \(.value.version // "linked")"' \
+      <<<"$j" 2>/dev/null || true)"
+  fi
+  if [ -z "$out" ] && [ -n "$j" ]; then
+    # solo il blocco "dependencies" di primo livello, poi un pacchetto per riga
+    out="$(printf '%s' "$j" | tr -d '\n' \
+      | sed 's/^.*"dependencies"[[:space:]]*:[[:space:]]*{//; s/},/}\n/g' \
+      | sed -n 's/^[[:space:]]*"\([^"]*\)"[[:space:]]*:[[:space:]]*{.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1 \2/p')"
+  fi
+  if [ -z "$out" ]; then
+    # senza versioni: dal --parseable bastano i nomi sotto node_modules
+    out="$(npm ls -g --depth=0 --parseable 2>/dev/null | sed -n 's#.*/node_modules/##p' || true)"
+  fi
+  printf '%s\n' "$out"
+  return 0
+}
+
+# uv tool list e cargo install --list indentano i dettagli: solo le righe di
+# intestazione servono a reinstallare.
+_inv_uv_tool_list() { _inv_run uv tool list | grep -v '^[[:space:]]' || true; }
+_inv_cargo_list()   { _inv_run cargo install --list | grep -v '^[[:space:]]' || true; }
+# snap list: solo i nomi, senza intestazione
+_inv_snap_list()    { _inv_run snap list | tail -n +2 | awk '{print $1}' || true; }
+# systemctl list-unit-files: "unit.service enabled", serve le unit abilitate
+_inv_user_units()   { _inv_run systemctl --user list-unit-files --state=enabled --no-legend | awk '{print $1}' || true; }
+_inv_system_units() { _inv_run systemctl list-unit-files --state=enabled --no-legend | awk '{print $1}' || true; }
+_inv_groups()       { _inv_run id -Gn | tr ' ' '\n' || true; }
+# shell di login: campo 7 di /etc/passwd (l'ultimo nome e' quello valido)
+_inv_login_shell()  { getent passwd "${USER:-$(id -un)}" 2>/dev/null | cut -d: -f7 || true; }
+_inv_desktop()      { printf '%s\n' "${XDG_CURRENT_DESKTOP:-}"; }
+_inv_gcloud_comps() { command -v gcloud >/dev/null 2>&1 || return 0; _inv_cap gcloud components list --only-local-state --format='value(id)'; }
+# os-release: CONFSYNC_OS_RELEASE se dato, altrimenti dentro CONFSYNC_ETC_ROOT
+# (cosi' i test non leggono il /etc vero)
+_inv_os_release()   { _inv_cat "${CONFSYNC_OS_RELEASE:-${CONFSYNC_ETC_ROOT:-}/etc/os-release}"; }
+
+# Un file di /etc posseduto da un pacchetto torna reinstallando il pacchetto:
+# nell'inventario finiscono solo quelli scritti a mano (override, tuning).
+# Ritorna 0 se il file e' di un pacchetto. _inv_run qui non va bene:
+# maschera l'exit status, che e' l'informazione che serve.
+_etc_owned() {
+  case "$1" in
+    arch)   command -v pacman >/dev/null 2>&1 && pacman -Qo "$2" >/dev/null 2>&1 ;;
+    debian) command -v dpkg    >/dev/null 2>&1 && dpkg -S    "$2" >/dev/null 2>&1 ;;
+    *)      return 1 ;;
+  esac
+}
+
+# Copia in DEST/system/etc i file elencati in ETC_SCAN (dir) ed
+# ETC_SCAN_FILES (file singoli), mantenendo il path relativo a /etc.
+# Con CONFSYNC_ETC_ROOT si legge un /etc finto.
+_inv_copy_etc() {
+  local dest="$1" distro="$2" entry abs rel f
+  for entry in "${ETC_SCAN[@]}" "${ETC_SCAN_FILES[@]}"; do
+    [ -n "$entry" ] || continue
+    abs="${CONFSYNC_ETC_ROOT:-}$entry"
+    # il path /etc/... resta leggibile dentro l'archivio (system/etc/etc/hosts)
+    rel="${entry#/}"
+    if [ -d "$abs" ]; then
+      while IFS= read -r f; do
+        [ -r "$f" ] || continue
+        if _etc_owned "$distro" "$f"; then continue; fi
+        mkdir -p "$dest/system/etc/$rel/$(dirname "${f#"$abs"/}")" 2>/dev/null || true
+        cp -a --no-preserve=ownership "$f" "$dest/system/etc/$rel/${f#"$abs"/}" 2>/dev/null || true
+      done < <(find "$abs" -type f -print 2>/dev/null | LC_ALL=C sort)
+    elif [ -f "$abs" ] && [ ! -L "$abs" ] && [ -r "$abs" ]; then
+      # file singoli (hosts, environment): di un pacchetto ma editati a mano,
+      # e pacman -Qii non li segna MODIFIED. Si copiano sempre.
+      mkdir -p "$dest/system/etc/$(dirname "$rel")" 2>/dev/null || true
+      cp -a --no-preserve=ownership "$abs" "$dest/system/etc/$rel" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
+
+# Config utente di VSCode: .config/Code e' escluso dai dotfiles (pesa troppo),
+# ma settings/keybindings/mcp/snippets/prompts sono configurazione da salvare.
+_inv_vscode_user() {
+  local dest="$1" src="$HOME/.config/Code/User" item
+  for item in settings.json keybindings.json mcp.json chatLanguageModels.json snippets prompts; do
+    if [ -e "$src/$item" ]; then
+      mkdir -p "$dest/vscode/User" 2>/dev/null || true
+      cp -a --no-preserve=ownership "$src/$item" "$dest/vscode/User/" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
+
+# Una riga per file presente nell'inventario: cosa contiene, senza aprirlo
+_inv_readme() {
+  local dest="$1" path
+  {
+    printf '# Inventario di sistema (confsync): stato della macchina al backup.\n'
+    printf '# Documentazione, non configurazione attiva: va letto, non ripristinato.\n'
+    while IFS='|' read -r path desc; do
+      [ -n "$path" ] || continue
+      if [ -e "$dest/$path" ]; then printf '%s: %s\n' "$path" "$desc"; fi
+    done <<'EOF'
+packages/native.txt|pacchetti nativi installati a mano
+packages/aur.txt|pacchetti AUR (solo arch)
+packages/flatpak.txt|app flatpak
+packages/snap.txt|snap installati
+dev/npm-global.txt|package npm globali (nome + versione, link inclusi)
+dev/nvm-versions.txt|versioni node installate via nvm
+dev/nvm-default.txt|alias nvm di default
+dev/pipx.txt|ambienti pipx
+dev/uv-tools.txt|tool uv
+dev/go-bin.txt|binari in ~/go/bin
+dev/cargo.txt|tool cargo installati
+dev/krew.txt|plugin krew
+dev/gcloud-components.txt|componenti gcloud installati
+dev/helm-plugins.txt|plugin helm
+dev/pyenv-versions.txt|versioni pyenv
+vscode/extensions.txt|estensioni VSCode
+vscode/User|settings.json, keybindings.json, mcp.json, chatLanguageModels.json, snippets, prompts
+system/crontab.txt|crontab utente
+system/user-units-enabled.txt|unit systemd utente abilitate
+system/system-units-enabled.txt|unit systemd di sistema abilitate
+system/groups.txt|gruppi dell'utente
+system/shell.txt|shell di login
+system/desktop.txt|desktop in uso
+system/os-release|distro di origine
+system/nm-connections.txt|connessioni NetworkManager
+system/timezone.txt|fuso orario
+system/locale.txt|localectl status
+system/etc|file di /etc scritti a mano, path mantenuto (es. system/etc/etc/hosts)
+EOF
+  } > "$dest/README.txt"
+}
+
+collect_inventory() {
+  local dest="$1" distro; distro="$(detect_distro)"
+  # solo le dir dei file prodotti dai comandi; vscode/User e system/etc nascono
+  # se c'e' qualcosa da copiare, cosi' il README non promette voci vuote
+  mkdir -p "$dest/packages" "$dest/dev" "$dest/vscode" "$dest/system" 2>/dev/null || true
+
+  case "$distro" in
+    arch)   _inv_cmd "$dest/packages/native.txt" pacman -Qqen
+            _inv_cmd "$dest/packages/aur.txt"    pacman -Qqem ;;
+    debian) _inv_cmd "$dest/packages/native.txt" apt-mark showmanual ;;
+    fedora) _inv_cmd "$dest/packages/native.txt" dnf \
+              repoquery --userinstalled --queryformat '%{name}' ;;  # vedi pkg_list_cmd
+  esac
+  _inv_cmd "$dest/packages/flatpak.txt" flatpak list --app --columns=application
+  _inv_capture "$dest/packages/snap.txt" _inv_snap_list
+
+  _inv_capture "$dest/dev/npm-global.txt"      _inv_npm_global
+  _inv_capture "$dest/dev/nvm-versions.txt"    _inv_ls "$HOME/.nvm/versions/node"
+  _inv_capture "$dest/dev/nvm-default.txt"     _inv_cat "$HOME/.nvm/alias/default"
+  _inv_cmd     "$dest/dev/pipx.txt"            pipx list --short
+  _inv_capture "$dest/dev/uv-tools.txt"        _inv_uv_tool_list
+  _inv_capture "$dest/dev/go-bin.txt"          _inv_ls "$HOME/go/bin"
+  _inv_capture "$dest/dev/cargo.txt"           _inv_cargo_list
+  _inv_cmd     "$dest/dev/krew.txt"            kubectl krew list
+  _inv_capture "$dest/dev/gcloud-components.txt" _inv_gcloud_comps
+  _inv_cmd     "$dest/dev/helm-plugins.txt"    helm plugin list
+  _inv_cmd     "$dest/dev/pyenv-versions.txt"  pyenv versions --bare
+
+  _inv_cmd "$dest/vscode/extensions.txt" code --list-extensions
+  _inv_vscode_user "$dest"
+
+  _inv_cmd "$dest/system/crontab.txt"              crontab -l
+  _inv_capture "$dest/system/user-units-enabled.txt"   _inv_user_units
+  _inv_capture "$dest/system/system-units-enabled.txt" _inv_system_units
+  _inv_capture "$dest/system/groups.txt"           _inv_groups
+  _inv_capture "$dest/system/shell.txt"            _inv_login_shell
+  _inv_capture "$dest/system/desktop.txt"          _inv_desktop
+  _inv_capture "$dest/system/os-release"           _inv_os_release
+  _inv_cmd     "$dest/system/nm-connections.txt"  nmcli -t -f NAME,TYPE connection show
+  _inv_cmd     "$dest/system/timezone.txt"        timedatectl show -p Timezone --value
+  _inv_cmd     "$dest/system/locale.txt"          localectl status
+  _inv_copy_etc "$dest" "$distro"
+  _inv_readme "$dest"
+  return 0
 }
 
 require_deps() {
@@ -104,6 +341,12 @@ pack_encrypt() {
   local tar_opts=(--sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner
                   --warning=no-file-changed --ignore-failed-read)
   local ex; for ex in "${EXCLUDE_PATTERNS[@]}"; do tar_opts+=(--exclude="$ex"); done
+  # DOTFILES_ONLY_EXCLUDES (credenziali gcloud/gh) solo per l'archivio dotfiles:
+  # applicale a tutti gli archivi le eliminerebbe anche da secrets.tar.enc,
+  # perché i --exclude di tar matchano su qualunque suffisso del path.
+  if [ "${PACK_DOTFILES:-0}" = "1" ]; then
+    for ex in "${DOTFILES_ONLY_EXCLUDES[@]}"; do tar_opts+=(--exclude="$ex"); done
+  fi
   _tar_stream "${tar_opts[@]}" -C "$src" -cf - "${existing[@]}" \
     | eval "$(_comp_cmd)" \
     | openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -pass fd:3 -out "$out" 3<<<"$pass"
@@ -131,30 +374,158 @@ is_secret_path() {
   return 1
 }
 
-list_repo_untracked() {
+# File locali di una repo da portare nel backup: tracciati modificati/staged,
+# untracked e ignorati (escluso junk e file oltre CONFSYNC_MAX_FILE_MB).
+# CLAUDE.md e .claude/ restano sempre: spesso gitignored ma configurazione di
+# valore non ricostruibile. I cancellati su disco vengono scartati.
+list_repo_localfiles() {
+  local repo="$1" rel size max=$(( CONFSYNC_MAX_FILE_MB * 1024 * 1024 ))
+  # Tracciati modificati/staged: sempre, solo tetto di dimensione. Il filtro
+  # junk vale per untracked e ignorati, dove sta la spazzatura rigenerabile.
   {
-    git -C "$1" ls-files --others --exclude-standard 2>/dev/null || true
-    # CLAUDE.md e .claude/ sono spesso gitignored ma contengono configurazione
-    # di valore non ricostruibile: vanno nel backup anche se ignorati.
-    git -C "$1" ls-files --others --ignored --exclude-standard -- CLAUDE.md .claude 2>/dev/null || true
-  } | sort -u
+    if git -C "$repo" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+      git -C "$repo" diff --name-only HEAD 2>/dev/null || true
+      git -C "$repo" diff --cached --name-only 2>/dev/null || true
+    else
+      git -C "$repo" ls-files 2>/dev/null || true
+    fi
+  } | sort -u | while IFS= read -r rel; do
+      [ -f "$repo/$rel" ] || continue
+      size="$(stat -c %s "$repo/$rel" 2>/dev/null || printf '0')"
+      [ "$size" -gt "$max" ] || printf '%s\n' "$rel"
+    done
+  {
+    git -C "$repo" ls-files --others --exclude-standard 2>/dev/null || true
+    git -C "$repo" ls-files --others --ignored --exclude-standard 2>/dev/null || true
+  } | sort -u | while IFS= read -r rel; do
+      [ -e "$repo/$rel" ] || continue
+      # worktree git create dagli agenti: si ricreano dal repo, pesano centinaia di MB
+      case "$rel" in .claude/worktrees/*) continue ;; esac
+      case "$rel" in
+        CLAUDE.md|*/CLAUDE.md|CLAUDE.local.md|.claude/*) ;;
+        *) if [ -n "${IGNORED_JUNK_RE:-}" ] && [[ "$rel" =~ $IGNORED_JUNK_RE ]]; then continue; fi ;;
+      esac
+      size="$(stat -c %s "$repo/$rel" 2>/dev/null || printf '0')"
+      [ "$size" -gt "$max" ] || printf '%s\n' "$rel"
+    done | sort -u
+}
+
+# File dentro i REPO_SCAN_DIRS ma fuori da ogni repo git (es. cartelle di
+# script o note sparse): senza .git non verrebbero mai manifestati, ma c'e'
+# roba non pushatabile che non va persa. Prune delle repo (dir con .git),
+# del junk (IGNORED_JUNK_RE) e dei file oltre CONFSYNC_MAX_FILE_MB; esclusi
+# anche i path relativi a HOME dichiarati in CODE_EXCLUDE_DIRS.
+list_nonrepo_files() {
+  local dir="$1" f rel size excluded ed
+  find "$dir" \
+    \( -name .terraform -o -name node_modules \) -prune -o \
+    -type d -exec test -d '{}/.git' \; -prune -o \
+    -type f -print0 2>/dev/null \
+    | while IFS= read -r -d '' f; do
+        rel="${f#"$HOME"/}"
+        excluded=0
+        for ed in "${CODE_EXCLUDE_DIRS[@]}"; do
+          if [ "$rel" = "$ed" ] || [[ "$rel" == "$ed"/* ]]; then excluded=1; break; fi
+        done
+        [ "$excluded" -eq 1 ] && continue
+        if [ -n "${IGNORED_JUNK_RE:-}" ] && [[ "$rel" =~ $IGNORED_JUNK_RE ]]; then continue; fi
+        size="$(stat -c %s "$f" 2>/dev/null || printf '0')"
+        [ "$size" -gt $(( CONFSYNC_MAX_FILE_MB * 1024 * 1024 )) ] && continue
+        printf '%s\n' "$rel"
+      done
+}
+
+# 0 = la repo ha qualcosa da mettere nel bundle (commit locali non pushati,
+# stash, o nessun remote ma con almeno una commit) — speculare a repo_bundle.
+repo_has_bundle() {
+  local repo="$1"
+  if [ -z "$(git -C "$repo" remote get-url origin 2>/dev/null || true)" ]; then
+    if git -C "$repo" rev-parse --verify --quiet HEAD >/dev/null 2>&1; then return 0; fi
+    return 1
+  fi
+  if [ "$(git -C "$repo" log --branches --not --remotes --oneline 2>/dev/null | wc -l)" -gt 0 ]; then return 0; fi
+  if [ "$(git -C "$repo" stash list 2>/dev/null | wc -l)" -gt 0 ]; then return 0; fi
+  return 1
+}
+
+# Crea un bundle con cio che non e' stato pushato (commit locali + stash).
+# Ritorna 0 e crea OUTFILE se c'e' qualcosa da salvare, 1 altrimenti.
+# I ref temporanei refs/bekky/* vengono SEMPRE rimossi, anche su errore
+# (subshell con trap: gli oggetti li recupera git, qui si pulisce solo i ref).
+repo_bundle() {
+  local repo="$1" out="$2"
+  local remote np nstash
+  remote="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+  if [ -z "$remote" ]; then
+    # senza remote: salva l'intera storia, se esiste almeno una commit
+    git -C "$repo" rev-parse --verify --quiet HEAD >/dev/null 2>&1 || return 1
+    mkdir -p "$(dirname "$out")"
+    git -C "$repo" bundle create "$out" --all >/dev/null 2>&1 || return 1
+    return 0
+  fi
+  np="$(git -C "$repo" log --branches --not --remotes --oneline 2>/dev/null | wc -l)"
+  nstash="$(git -C "$repo" stash list 2>/dev/null | wc -l)"
+  if [ "$np" -eq 0 ] && [ "$nstash" -eq 0 ]; then return 1; fi
+  mkdir -p "$(dirname "$out")"
+  (
+    local ok=0
+    # refs temporanei spariti SEMPRE, anche in caso di successo; il bundle
+    # parziale solo su errore
+    # shellcheck disable=SC2329  # invocata via trap EXIT qui sotto
+    cleanup() {
+      local refs ref
+      refs="$(git -C "$repo" for-each-ref --format='%(refname)' refs/bekky 2>/dev/null || true)"
+      for ref in $refs; do git -C "$repo" update-ref -d "$ref" 2>/dev/null || true; done
+      [ "$ok" -eq 1 ] || rm -f "$out"
+    }
+    trap cleanup EXIT
+    local i sref srefs=()
+    for ((i=0; i<nstash; i++)); do
+      git -C "$repo" update-ref "refs/bekky/stash/$i" "stash@{$i}"
+    done
+    local args=(--branches)
+    if [ "$nstash" -gt 0 ]; then
+      # refs concreti: git rifiuta un glob davanti a --not ("must come before
+      # non-option arguments") e con reftable lo shell glob non matcha.
+      while IFS= read -r sref; do srefs+=("$sref"); done \
+        < <(git -C "$repo" for-each-ref --format='%(refname)' refs/bekky/stash 2>/dev/null || true)
+      args+=("${srefs[@]}")
+    fi
+    args+=(--not --remotes)
+    if ! berr="$(git -C "$repo" bundle create "$out" "${args[@]}" 2>&1)"; then
+      if [ "$nstash" -gt 0 ] && grep -q empty <<<"$berr"; then
+        # bundle vuoto per via del solo --not --remotes: riprova includendo
+        # gli stash senza quel filtro
+        git -C "$repo" bundle create "$out" --branches "${srefs[@]}" >/dev/null 2>&1 || return 1
+      else
+        printf '%s\n' "$berr" >&2
+        return 1
+      fi
+    fi
+    ok=1
+  )
+  return $?
 }
 
 collect_repos() {
   local out="$1"; local first=1
   { printf '['
-    local d repo remote branch
+    local d repo remote branch bund
     for d in "${REPO_SCAN_DIRS[@]}"; do
       [ -d "$d" ] || continue
+      # prune di .terraform e node_modules: moduli terraform scaricati e
+      # dipendenze sono repo git spurie, non vanno manifestate.
       while IFS= read -r -d '' gitdir; do
         repo="$(dirname "$gitdir")"
         remote="$(git -C "$repo" remote get-url origin 2>/dev/null || echo "")"
         branch="$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+        bund=0; repo_has_bundle "$repo" && bund=1
         [ $first -eq 1 ] || printf ','
         first=0
-        printf '{"path":"%s","remote":"%s","branch":"%s"}' \
-          "$repo" "$remote" "$branch"
-      done < <(find "$d" -type d -name .git -prune -print0 2>/dev/null)
+        printf '{"path":"%s","remote":"%s","branch":"%s","bundle":"%s"}' \
+          "$repo" "$remote" "$branch" "$bund"
+      done < <(find "$d" \( -name .terraform -o -name node_modules \) -prune \
+               -o -type d -name .git -prune -print0 2>/dev/null)
     done
     printf ']'
   } > "$out"
@@ -210,7 +581,7 @@ cmd_backup() {
   [ -n "${CONFSYNC_WORKDIR_KEEP:-}" ] || trap "rm -rf '$work'" EXIT
 
   log "raccolgo dotfiles"
-  pack_encrypt "$HOME" "$work/dotfiles.tar.enc" "${INCLUDE_DOTFILES[@]}"
+  PACK_DOTFILES=1 pack_encrypt "$HOME" "$work/dotfiles.tar.enc" "${INCLUDE_DOTFILES[@]}"
 
   log "raccolgo secrets"
   local secstage="$work/.sec"; mkdir -p "$secstage"
@@ -222,12 +593,17 @@ cmd_backup() {
   log "scansiono repo"
   collect_repos "$work/repos.manifest.json"
   local localstage="$work/.local"; mkdir -p "$localstage"
-  local repo rel base
+  local bundstage="$work/.bundles"; mkdir -p "$bundstage"
+  local repo rel base d
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
+    base="${repo#"$HOME"/}"
+    # commit/stash non pushati in un bundle (niente va perso)
+    if repo_bundle "$repo" "$bundstage/$base/repo.bundle"; then
+      log "bundle repo: $base"
+    fi
     while IFS= read -r rel; do
       [ -n "$rel" ] || continue
-      base="${repo#"$HOME"/}"
       if is_secret_path "$rel"; then
         mkdir -p "$secstage/$base/$(dirname "$rel")"
         cp -a "$repo/$rel" "$secstage/$base/$rel" 2>/dev/null || true
@@ -235,12 +611,38 @@ cmd_backup() {
         mkdir -p "$localstage/$base/$(dirname "$rel")"
         cp -a "$repo/$rel" "$localstage/$base/$rel" 2>/dev/null || true
       fi
-    done < <(list_repo_untracked "$repo")
+    done < <(list_repo_localfiles "$repo")
   done < <(grep -o '"path":"[^"]*"' "$work/repos.manifest.json" | sed 's/"path":"//;s/"$//')
 
-  pack_encrypt "$secstage"   "$work/secrets.tar.enc"          .
-  pack_encrypt "$localstage" "$work/repo-localfiles.tar.enc"  .
-  rm -rf "$secstage" "$localstage"
+  # File dentro i REPO_SCAN_DIRS ma fuori da ogni repo (script, note sparse):
+  # stessa destinazione dei file locali di repo, con lo stesso routing secrets.
+  for d in "${REPO_SCAN_DIRS[@]}"; do
+    [ -d "$d" ] || continue
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      if is_secret_path "$rel"; then
+        mkdir -p "$secstage/$(dirname "$rel")"
+        cp -a "$HOME/$rel" "$secstage/$rel" 2>/dev/null || true
+      else
+        mkdir -p "$localstage/$(dirname "$rel")"
+        cp -a "$HOME/$rel" "$localstage/$rel" 2>/dev/null || true
+      fi
+    done < <(list_nonrepo_files "$d")
+  done
+
+  pack_encrypt "$secstage"    "$work/secrets.tar.enc"          .
+  pack_encrypt "$localstage"  "$work/repo-localfiles.tar.enc"  .
+  pack_encrypt "$bundstage"   "$work/repo-bundles.tar.enc"     .
+  rm -rf "$secstage" "$localstage" "$bundstage"
+
+  # Inventario: foto dello stato (pacchetti, tool, unit, /etc scritto a
+  # mano). Nessun comando puo' farlo fallire, quindi un backup fatto su una
+  # macchina strana non si perde per questo.
+  log "inventario di sistema"
+  local invstage="$work/.inv"; mkdir -p "$invstage"
+  collect_inventory "$invstage"
+  pack_encrypt "$invstage" "$work/inventory.tar.enc" .
+  rm -rf "$invstage"
 
   log "lista pacchetti"
   local plc; plc="$(pkg_list_cmd)"
@@ -263,8 +665,10 @@ cmd_backup() {
   # sono deterministici, i .enc no (salt casuale). Include anche i file in chiaro.
   ( cd "$work"
     cat ./*.contentsha 2>/dev/null
-    [ -f repos.manifest.json ] && sha256sum repos.manifest.json | awk '{print $1}'
-    [ -f packages.txt ]        && sha256sum packages.txt        | awk '{print $1}'
+    # if, non &&: su una distro non riconosciuta packages.txt non esiste e il
+    # backup deve comunque finire (la firma si calcola su quello che c'e')
+    if [ -f repos.manifest.json ]; then sha256sum repos.manifest.json | awk '{print $1}'; fi
+    if [ -f packages.txt ];         then sha256sum packages.txt         | awk '{print $1}'; fi
   ) | sort | sha256sum | awk '{print $1}' > "$work/BUNDLE.sha"
   rm -f "$work"/*.contentsha
 
@@ -276,6 +680,156 @@ cmd_backup() {
   log "upload -> $BUCKET/$HOSTNAME_TAG/$ts/"
   gcs_upload "$work" "$ts"
   log "backup completato: $ts"
+}
+
+# --- Restore delle repo dai bundle -------------------------------------------
+# Il remote non contiene cio che e' rimasto in locale: il bundle e' l'unica
+# copia dei commit non pushati e degli stash, quindi senza applicarlo una repo
+# ripristinata perderebbe lavoro.
+
+# Nel manifest i path sono quelli della macchina di origine: con una HOME
+# diversa vanno rimappati, altrimenti il restore scrive fuori dalla home
+# corrente (o dentro la vecchia, se esiste ancora).
+_restore_repo_path() {
+  local p="$1" origin="$2"
+  if [ -n "$origin" ] && [ "$p" != "$origin" ] && [ "${p#"$origin"/}" != "$p" ]; then
+    printf '%s' "$HOME/${p#"$origin"/}"
+  else
+    printf '%s' "$p"
+  fi
+}
+
+# Applica a PATH i commit e gli stash del bundle: branch mancanti creati,
+# branch indietro fast-forwardati, branch divergenti lasciati intatti e
+# copiati su bekky/<branch>. I ref temporanei refs/bekky-restore/* spariscono
+# SEMPRE, anche su errore (subshell con trap, come repo_bundle).
+_restore_repo_bundle() {
+  local path="$1" bundle="$2"
+  (
+    local ref b current n sha
+    # refs temporanei spariti SEMPRE, anche su errore
+    # shellcheck disable=SC2329  # invocata via trap EXIT qui sotto
+    cleanup() {
+      local r
+      while IFS= read -r r; do
+        git -C "$path" update-ref -d "$r" 2>/dev/null || true
+      done < <(git -C "$path" for-each-ref --format='%(refname)' refs/bekky-restore 2>/dev/null || true)
+    }
+    trap cleanup EXIT
+    # refspec con wildcards: quelle che non matchano sono un no-op silenzioso,
+    # i bundle non contengono sempre gli stash
+    git -C "$path" fetch "$bundle" \
+      'refs/heads/*:refs/bekky-restore/heads/*' \
+      'refs/bekky/stash/*:refs/bekky-restore/stash/*' >/dev/null 2>&1 || true
+    # i bundle delle repo senza remote sono creati con --all: lo stash c'e'
+    # come refs/stash, non come refs/bekky/stash/N (refspec concreto e
+    # inesistente, invece, fa fallire tutto il fetch)
+    if git bundle list-heads "$bundle" 2>/dev/null | grep -q ' refs/stash$'; then
+      git -C "$path" fetch "$bundle" 'refs/stash:refs/bekky-restore/stash/0' >/dev/null 2>&1 || true
+    fi
+
+    current="$(git -C "$path" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      b="${ref#refs/bekky-restore/heads/}"
+      sha="$(git -C "$path" rev-parse "$ref" 2>/dev/null || true)"
+      [ -n "$sha" ] || continue
+      if ! git -C "$path" show-ref --verify --quiet "refs/heads/$b"; then
+        if git -C "$path" branch "$b" "$sha" >/dev/null 2>&1; then
+          log "branch dal bundle: $b"
+        fi
+      elif [ "$(git -C "$path" rev-parse "refs/heads/$b" 2>/dev/null || true)" = "$sha" ]; then
+        continue   # gia' allineati (restore ripetuto): niente da fare
+      elif git -C "$path" merge-base --is-ancestor "refs/heads/$b" "$sha" 2>/dev/null; then
+        # il bundle e' piu' avanti: fast-forward. git branch -f rifiuta di
+        # spostare il branch corrente, quindi li si tocca con un merge
+        if [ "$b" = "$current" ]; then
+          if git -C "$path" merge --ff-only "$sha" >/dev/null 2>&1; then
+            log "branch aggiornato dal bundle: $b"
+          else
+            log "fast-forward di '$b' saltato (worktree non pulito): resta indietro"
+          fi
+        elif git -C "$path" branch -f "$b" "$sha" >/dev/null 2>&1; then
+          log "branch aggiornato dal bundle: $b"
+        fi
+      else
+        # divergente: il branch locale vince, il bundle non si perde
+        if git -C "$path" branch "bekky/$b" "$sha" >/dev/null 2>&1; then
+          log "branch '$b' divergente dal backup: salvato come bekky/$b"
+        fi
+      fi
+    done < <(git -C "$path" for-each-ref --format='%(refname)' refs/bekky-restore/heads 2>/dev/null || true)
+
+    # stash@{0} del backup era il piu' recente e git stash store mette in
+    # cima: ripristinando dal piu' vecchio al piu' recente l'ordine si
+    # conserva
+    local names=()
+    while IFS= read -r n; do names+=("$n"); done < <(
+      git -C "$path" for-each-ref --format='%(refname)' refs/bekky-restore/stash 2>/dev/null \
+        | sed -n 's#.*/##p' | grep -E '^[0-9]+$' | sort -rn || true)
+    if [ ${#names[@]} -gt 0 ]; then
+      for n in "${names[@]}"; do
+        sha="$(git -C "$path" rev-parse "refs/bekky-restore/stash/$n" 2>/dev/null || true)"
+        [ -n "$sha" ] || continue
+        # idempotente: uno stash con lo stesso sha non si duplica
+        if git -C "$path" stash list --format=%H 2>/dev/null | grep -qxF "$sha"; then continue; fi
+        if git -C "$path" stash store -m "bekky stash $n" "$sha" >/dev/null 2>&1; then
+          log "stash $n ripristinato"
+        fi
+      done
+    fi
+  )
+  return 0
+}
+
+# Una repo del manifest: clone (dal remote, o dal bundle se non c'e' remote) e
+# applicazione del bundle. Idempotente: su una repo gia' su disco non si
+# riclona e gli stash non si duplicano.
+restore_repo() {
+  local path="$1" remote="$2" branch="$3" bundle="$4"
+  local rel out src cloned=0 applied=0
+  rel="${path#"$HOME"/}"
+  if [ -d "$path/.git" ]; then
+    log "repo gia' presente, non riclono: $rel"
+  elif [ -n "$remote" ] || [ -f "$bundle" ]; then
+    # niente remote: il bundle e' l'unica copia della repo
+    src="${remote:-$bundle}"
+    # La dir puo' esistere gia' senza .git: un restore precedente con clone
+    # fallito (SSH non pronto) vi ha estratto i file locali. git clone rifiuta
+    # una dir non vuota, quindi si clona a parte e si sposta dentro solo .git.
+    local tmp="$path.bekky-clone"
+    rm -rf "$tmp"; mkdir -p "$(dirname "$path")"
+    # senza prompt: un remote https senza credenziali bloccherebbe il restore
+    if ! out="$(GIT_TERMINAL_PROMPT=0 git clone --no-checkout "$src" "$tmp" 2>&1)"; then
+      rm -rf "$tmp"
+      log "clone fallito: $rel ($src)"; printf '%s\n' "$out" >&2; return 0
+    fi
+    mkdir -p "$path" && mv "$tmp/.git" "$path/.git" && rm -rf "$tmp"
+    # reset --hard tocca solo i tracciati: gli untracked gia' estratti restano,
+    # i tracciati modificati tornano dopo con repo-localfiles
+    git -C "$path" reset -q --hard >/dev/null 2>&1 || true
+    cloned=1
+    # il remote punterebbe al bundle in ~/.config/confsync/bundles, che il
+    # prossimo restore sostituisce: la repo deve restare senza remote
+    [ -n "$remote" ] || git -C "$path" remote remove origin >/dev/null 2>&1 || true
+  else
+    log "skip $rel (no remote, nessun bundle)"
+    return 0
+  fi
+
+  if [ -f "$bundle" ]; then
+    _restore_repo_bundle "$path" "$bundle"
+    applied=1
+  fi
+
+  # il branch registrato si mette solo se la repo e' stata toccata dal
+  # restore: su una repo gia' in uso non si cambia sotto i piedi
+  if [ -n "$branch" ] && [ $((cloned + applied)) -gt 0 ]; then
+    if ! git -C "$path" checkout "$branch" >/dev/null 2>&1; then
+      log "checkout di '$branch' non riuscito in $rel"
+    fi
+  fi
+  return 0
 }
 
 cmd_restore() {
@@ -319,22 +873,43 @@ cmd_restore() {
     log "secrets ripristinati (permessi 600)"
   fi
 
+  # L'inventario non e' configurazione attiva: e' documentazione dello stato
+  # della macchina di origine, quindi si estrae sempre (senza flag) in una dir
+  # dedicata, sostituendo quanto c'era. Serve al ripristino manuale.
+  if [ -f "$work/inventory.tar.enc" ]; then
+    local invdir="$HOME/.config/confsync/inventory"
+    rm -rf "$invdir"
+    decrypt_unpack "$work/inventory.tar.enc" "$invdir"
+    log "inventario estratto in $invdir"
+  fi
+
   if [ $do_repos -eq 1 ] && [ -f "$work/repos.manifest.json" ]; then
-    local entry path remote branch
+    # I bundle servono al ripristino delle repo: si estraggono prima di
+    # qualunque operazione git, che li usa come sorgente dei commit locali.
+    local bunddir="$HOME/.config/confsync/bundles"
+    if [ -f "$work/repo-bundles.tar.enc" ]; then
+      rm -rf "$bunddir"
+      decrypt_unpack "$work/repo-bundles.tar.enc" "$bunddir"
+      log "bundle delle repo estratti in $bunddir"
+    fi
+    # path del manifest = home di origine: vanno rimappati sulla home corrente
+    local origin; origin="$(cat "$work/origin.home" 2>/dev/null || echo "$HOME")"
+    local entry path remote branch bundle bundled
     grep -o '{[^}]*}' "$work/repos.manifest.json" | while read -r entry; do
       path="$(echo "$entry"  | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')"
       remote="$(echo "$entry"| sed -n 's/.*"remote":"\([^"]*\)".*/\1/p')"
       branch="$(echo "$entry"| sed -n 's/.*"branch":"\([^"]*\)".*/\1/p')"
-      [ -n "$remote" ] || { log "skip $path (no remote)"; continue; }
-      if [ ! -d "$path/.git" ]; then
-        mkdir -p "$(dirname "$path")"
-        if git clone "$remote" "$path"; then
-          [ -n "$branch" ] && git -C "$path" checkout "$branch" 2>/dev/null || true
-        else
-          log "clone fallito: $path ($remote)"
-        fi
+      bundled="$(echo "$entry"| sed -n 's/.*"bundle":"\([^"]*\)".*/\1/p')"
+      [ -n "$path" ] || continue
+      path="$(_restore_repo_path "$path" "$origin")"
+      bundle="$bunddir/${path#"$HOME"/}/repo.bundle"
+      if [ ! -f "$bundle" ] && [ "$bundled" = "1" ]; then
+        log "bundle mancante per ${path#"$HOME"/}: commit locali non ripristinati"
       fi
+      restore_repo "$path" "$remote" "$branch" "$bundle"
     done
+    # DOPO tutti i passi git: i file locali sovrascrivono i tracciati
+    # modificati con la versione del backup.
     [ -f "$work/repo-localfiles.tar.enc" ] && decrypt_unpack "$work/repo-localfiles.tar.enc" "$HOME"
     log "repo ripristinate"
   fi
