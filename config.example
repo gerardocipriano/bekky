@@ -5,3 +5,4 @@ export CONFSYNC_PROJECT="il-tuo-progetto-gcp"        # solo per scripts/create-b
 export CONFSYNC_ACCOUNT="tua.email@example.com"      # account gcloud (opzionale)
 # export CONFSYNC_HOST_TAG="$(hostname)"             # tag host nel bucket (default: hostname)
 # export CONFSYNC_ZSTD_LEVEL=10                       # livello compressione zstd
+# export CONFSYNC_CODE_EXCLUDE_DIRS="code/archivio code/vendor"  # dir di ~/code escluse dai file fuori repo
