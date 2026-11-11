@@ -50,16 +50,25 @@ fi
 
 mkdir -p "$CONF" && chmod 700 "$CONF"
 if [ ! -f "$CONF/config" ]; then
+  # Niente dati personali nel repo: bucket, progetto, account e host del
+  # vecchio PC arrivano da BEKKY_* davanti al comando oppure dai prompt.
   # HOST_TAG del vecchio PC: il nuovo ha un altro hostname e senza questo
   # restore non trova il backup.
-  cat > "$CONF/config" <<'EOF'
-export CONFSYNC_BUCKET="gs://il-tuo-bucket"
-export CONFSYNC_PROJECT="il-tuo-progetto"
-export CONFSYNC_ACCOUNT="tu@esempio.it"
-export CONFSYNC_HOST_TAG="vecchio-pc"
+  b="${BEKKY_BUCKET:-}"; a="${BEKKY_ACCOUNT:-}"; pj="${BEKKY_PROJECT:-}"; h="${BEKKY_HOST_TAG:-}"
+  [ -n "$b" ] || read -rp "Bucket dei backup (gs://...): " b
+  [ -n "$a" ] || read -rp "Account Google: " a
+  [ -n "$h" ] || read -rp "Hostname del vecchio PC (host tag del backup): " h
+  case "$b" in gs://*) ;; *) b="gs://$b" ;; esac
+  cat > "$CONF/config" <<EOF
+export CONFSYNC_BUCKET="$b"
+export CONFSYNC_PROJECT="$pj"
+export CONFSYNC_ACCOUNT="$a"
+export CONFSYNC_HOST_TAG="$h"
 EOF
   chmod 600 "$CONF/config"
 fi
+# shellcheck disable=SC1090,SC1091
+. "$CONF/config"
 
 if [ ! -s "$CONF/passphrase" ]; then
   say "passphrase bekky (1Password: 'bekky passphrase')"
@@ -68,9 +77,9 @@ if [ ! -s "$CONF/passphrase" ]; then
 fi
 
 say "login gcloud (si apre il browser)"
-gcloud auth list --format='value(account)' 2>/dev/null | grep -qx tu@esempio.it \
-  || gcloud auth login tu@esempio.it
-CLOUDSDK_CORE_ACCOUNT=tu@esempio.it gsutil cat gs://il-tuo-bucket/vecchio-pc/latest >/dev/null \
+gcloud auth list --format='value(account)' 2>/dev/null | grep -qx "$CONFSYNC_ACCOUNT" \
+  || gcloud auth login "$CONFSYNC_ACCOUNT"
+CLOUDSDK_CORE_ACCOUNT="$CONFSYNC_ACCOUNT" gsutil cat "$CONFSYNC_BUCKET/$CONFSYNC_HOST_TAG/latest" >/dev/null \
   && echo "backup raggiungibile"
 
 cat <<EOF

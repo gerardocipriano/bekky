@@ -136,7 +136,7 @@ Macchina nuova/rotta:
 ```
 # 1. bootstrap: lo script rileva mancanza di openssl/gcloud e guida l'installazione
 # 2. copia lo script (da git o curl)
-gcloud auth login           # account azienda
+gcloud auth login           # account del bucket
 confsync restore            # chiede passphrase, ripristina dotfiles
 confsync restore --secrets  # ripristina chiavi (permessi 600)
 confsync restore --repos    # ri-clona repo nella stessa posizione

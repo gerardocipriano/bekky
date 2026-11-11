@@ -132,7 +132,7 @@ jpost() {
 import json, sys
 d = json.load(sys.stdin)
 assert d["bucket"].startswith("gs://") and d["project"] and d["account"]
-assert d["defaults"]["bucket"] == "gs://il-tuo-bucket"
+assert d["defaults"]["bucket"] == ""
 assert d["configPath"] and d["passphrasePath"]
 assert not [k for k in d if "passphrase" in k.lower() and k != "passphrasePath"]'
   [ "$(code "http://127.0.0.1:$PORT/api/config")" = 403 ]
@@ -171,7 +171,7 @@ assert not [k for k in d if "passphrase" in k.lower() and k != "passphrasePath"]
   mkdir -p "$UI_HOME/.config/confsync"
   local f="$UI_HOME/.config/confsync/config"
   printf '%s\n' '# commento mio' 'export CONFSYNC_BUCKET="gs://vecchio-spazio"  # nota' \
-    'export CONFSYNC_ACCOUNT="vecchio@x.it"' 'export CONFSYNC_OP_REF="op://Personal/bekky passphrase/password"' \
+    'export CONFSYNC_ACCOUNT="vecchio@x.it"' 'export CONFSYNC_OP_REF="op://Vault/bekky passphrase/password"' \
     'export CONFSYNC_HOST_TAG="mio-pc"' > "$f"
   chmod 644 "$f"
   HOME="$UI_HOME" python3 - "$BATS_TEST_DIRNAME/../ui" <<'PY'
@@ -184,7 +184,7 @@ PY
   grep -qx 'export CONFSYNC_BUCKET="gs://nuovo-spazio"  # nota' "$f"
   grep -qx 'export CONFSYNC_ACCOUNT="nuovo@x.it"' "$f"
   grep -qx 'export CONFSYNC_PROJECT="progetto-nuovo"' "$f"
-  grep -qx 'export CONFSYNC_OP_REF="op://Personal/bekky passphrase/password"' "$f"
+  grep -qx 'export CONFSYNC_OP_REF="op://Vault/bekky passphrase/password"' "$f"
   grep -qx 'export CONFSYNC_HOST_TAG="mio-pc"' "$f"
   [ "$(stat -c %a "$f")" = 600 ]
   grep -q 'vecchio-spazio' "$f.bak"

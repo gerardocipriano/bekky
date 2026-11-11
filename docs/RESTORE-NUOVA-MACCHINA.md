@@ -16,7 +16,7 @@ pacman ad apt, tool di sviluppo, unit, cron, verifica.
 
 Prerequisiti da procurarsi PRIMA (non stanno nel backup):
 1. **Passphrase confsync** (senza, gli archivi `.enc` sono irrecuperabili — tienila in un password manager)
-2. Accesso GCP con `tu@esempio.it`
+2. Accesso GCP con `<tuo-account-google>`
 
 ## Procedura
 
@@ -27,7 +27,7 @@ sudo apt-get update && sudo apt-get install -y git openssl zstd cron
 # https://cloud.google.com/sdk/docs/install#deb
 
 # 2. Login gcloud con l'account personale
-gcloud auth login tu@esempio.it
+gcloud auth login <tuo-account-google>
 
 # 3. Clona bekky
 git clone git@github.com:gerardocipriano/bekky.git ~/code/misc/bekky   # o https
@@ -35,10 +35,10 @@ git clone git@github.com:gerardocipriano/bekky.git ~/code/misc/bekky   # o https
 # 4. Config locale (bucket + host tag del VECCHIO pc, perché il nuovo ha hostname diverso)
 mkdir -p ~/.config/confsync && chmod 700 ~/.config/confsync
 cat > ~/.config/confsync/config <<'EOF'
-export CONFSYNC_BUCKET="gs://il-tuo-bucket"
-export CONFSYNC_PROJECT="il-tuo-progetto"
-export CONFSYNC_ACCOUNT="tu@esempio.it"
-export CONFSYNC_HOST_TAG="vecchio-pc"   # host di origine del backup da ripristinare
+export CONFSYNC_BUCKET="gs://<tuo-bucket>"
+export CONFSYNC_PROJECT="<tuo-progetto>"
+export CONFSYNC_ACCOUNT="<tuo-account-google>"
+export CONFSYNC_HOST_TAG="<hostname-vecchio-pc>"   # host di origine del backup da ripristinare
 EOF
 
 # 5. Passphrase (chiesta interattivamente, oppure:)

@@ -68,7 +68,7 @@ main() {
 
   mkdir -p "$CONF"; chmod 700 "$CONF"
 
-  # --- 4. passphrase e login gcloud: gli unici prompt, uno dopo l'altro ---
+  # --- 4. passphrase, bucket (se non passato) e login gcloud: i soli prompt ---
   local pass="" saved=0
   if [ -n "${CONFSYNC_PASSPHRASE:-}" ]; then pass="$CONFSYNC_PASSPHRASE"
   elif [ -s "$CONF/passphrase" ]; then pass="$(cat "$CONF/passphrase")"; saved=1; fi
@@ -78,13 +78,24 @@ main() {
   export CONFSYNC_PASSPHRASE="$pass"
 
   if [ -z "${CONFSYNC_QUICK_SRC:-}" ]; then
-    # stessi default di bootstrap.sh, senza HOST_TAG: il quick non dipende dall'host
+    # Niente default nel repo (e' pubblico): bucket e account arrivano da
+    # BEKKY_BUCKET/BEKKY_ACCOUNT/BEKKY_PROJECT davanti al one-liner (la console,
+    # vista "Nuovo PC", stampa il comando completo) oppure da un prompt.
     if [ ! -f "$CONF/config" ]; then
-      # BEKKY_BUCKET/PROJECT/ACCOUNT davanti al one-liner per un bucket diverso
+      local b="${BEKKY_BUCKET:-}" a="${BEKKY_ACCOUNT:-}"
+      if [ -z "$b" ]; then
+        [ -r /dev/tty ] || err "manca BEKKY_BUCKET (es. BEKKY_BUCKET=gs://il-tuo-bucket) e non c'e' un terminale per chiederlo"
+        read -rp "Bucket dei salvataggi (gs://...): " b </dev/tty
+        [ -n "${BEKKY_ACCOUNT+x}" ] || read -rp "Account Google (invio = lo scegli nel browser): " a </dev/tty
+      fi
+      case "$b" in gs://*) ;; *) b="gs://$b" ;; esac
+      [[ "$b" =~ ^gs://[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$ ]] || err "bucket non valido: $b"
+      [[ "$a" =~ ^[A-Za-z0-9._%+@-]*$ ]] || err "account non valido: $a"
+      [[ "${BEKKY_PROJECT:-}" =~ ^[a-z0-9:.-]*$ ]] || err "progetto non valido: ${BEKKY_PROJECT:-}"
       cat > "$CONF/config" <<EOF
-export CONFSYNC_BUCKET="${BEKKY_BUCKET:-gs://il-tuo-bucket}"
-export CONFSYNC_PROJECT="${BEKKY_PROJECT:-il-tuo-progetto}"
-export CONFSYNC_ACCOUNT="${BEKKY_ACCOUNT:-tu@esempio.it}"
+export CONFSYNC_BUCKET="$b"
+export CONFSYNC_PROJECT="${BEKKY_PROJECT:-}"
+export CONFSYNC_ACCOUNT="$a"
 EOF
       chmod 600 "$CONF/config"
     fi
@@ -99,14 +110,17 @@ EOF
       [ "$rc" -eq 0 ] || [ "$rc" -eq "$SKIP" ] || err "installazione di gcloud fallita (rc=$rc)"
       export PATH="$HOME/google-cloud-sdk/bin:$PATH"
     fi
-    local acct="${CONFSYNC_ACCOUNT:-}"
-    if [ -n "$acct" ] && ! gcloud auth list --format='value(account)' 2>/dev/null | grep -qx "$acct"; then
-      say "login gcloud: $acct"
+    local acct="${CONFSYNC_ACCOUNT:-}" logged
+    logged="$(gcloud auth list --format='value(account)' 2>/dev/null || true)"
+    # con un account in config serve quello; senza, basta un account qualsiasi
+    if { [ -n "$acct" ] && ! grep -qx "$acct" <<<"$logged"; } || [ -z "$logged" ]; then
+      say "login gcloud${acct:+: $acct}"
       local flags=()
       # senza browser (SSH, server): il flusso con codice da incollare
       if [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then flags+=(--no-launch-browser); fi
-      if [ -r /dev/tty ]; then gcloud auth login "$acct" "${flags[@]}" </dev/tty
-      else err "serve un terminale per gcloud auth login: esegui 'gcloud auth login $acct' e rilancia"; fi
+      [ -r /dev/tty ] || err "serve un terminale per gcloud auth login: esegui 'gcloud auth login $acct' e rilancia"
+      # shellcheck disable=SC2086  # acct vuoto = nessun argomento
+      gcloud auth login $acct "${flags[@]}" </dev/tty
     fi
   fi
 

@@ -101,6 +101,9 @@ bekky restore --repos        # ri-clona le repo + file locali
 bekky restore --packages     # comando di reinstallazione pacchetti per la distro
 bekky restore --dry-run      # anteprima, non tocca nulla
 bekky restore --no-dotfiles --repos   # secondo passaggio: non annulla rehome e modifiche
+bekky backup --quick         # solo il set quick (config Claude, secrets): secondi
+bekky restore --quick        # ripristina il set quick
+bekky ui                     # console web locale
 CONFSYNC_RESTORE_TS=<ts> bekky restore   # un backup diverso dall'ultimo
 ```
 
@@ -113,11 +116,14 @@ in `~/.config/confsync/pre-restore/`.
 ## ⚡ Quick: operativo in un minuto su un PC vuoto
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gerardocipriano/bekky/main/scripts/quick.sh | bash
-# senza curl (Ubuntu desktop):  wget -qO- <stesso URL> | bash
+curl -fsSL https://raw.githubusercontent.com/gerardocipriano/bekky/main/scripts/quick.sh \
+  | BEKKY_BUCKET=gs://il-tuo-bucket BEKKY_ACCOUNT=tu@esempio.it bash
+# senza curl (Ubuntu desktop):  wget -qO- <stesso URL> | BEKKY_BUCKET=... bash
 ```
 
-Chiede due cose, una dopo l'altra: la passphrase e il login gcloud. Poi:
+Il comando già compilato con il tuo bucket lo trovi nella console, vista
+**Nuovo PC**. Senza `BEKKY_BUCKET` lo script lo chiede. Poi chiede la
+passphrase e il login gcloud, e da lì non fa altre domande:
 
 1. ripristina config e memoria di Claude Code, plugin, skill, shell, git, profili
    gcloud e i secrets (chiavi SSH, credenziali gcloud, kube, token gh);
@@ -126,21 +132,33 @@ Chiede due cose, una dopo l'altra: la passphrase e il login gcloud. Poi:
    globali, rtk, uv, opencode, gcloud, terraform, kubectl, gh, glab, jq, op) e
    clona le repo di `~/code`.
 
-Stato e log: `~/.config/confsync/quick-logs/`. Commit non pushati, stash e file
-non versionati delle repo arrivano dopo, dal backup completo:
-`bekky restore --yes --no-dotfiles --repos`.
+Su Ubuntu 24.04 vuoto: Claude Code pronto in circa 10 secondi, tool in meno di
+un minuto. Stato e log in `~/.config/confsync/quick-logs/`.
 
-Il set quick (~65 MB) vive in `$BUCKET/quick/`, non dipende dall'hostname e si
-aggiorna con:
+Commit non pushati, stash e file non versionati delle repo arrivano dopo, dal
+backup completo: `bekky restore --yes --no-dotfiles --repos`.
+
+### Tenere aggiornato il set quick
 
 ```bash
 bekky backup --quick             # carica solo gli archivi cambiati
 ./scripts/install-hooks.sh       # lo fa da solo a ogni fine sessione di Claude Code
+./scripts/install-hooks.sh --uninstall
 ```
 
-Cosa entra nel core si regola in `lib/manifest.sh` (`QUICK_INCLUDE`,
-`QUICK_EXCLUDES`, `QUICK_SPLIT`, `QUICK_TOOLS`); i file oltre
-`CONFSYNC_QUICK_MAX_FILE_MB` (default 5) restano fuori.
+Il set (~65 MB) vive in `$BUCKET/quick/` e non dipende dall'hostname. Gli
+archivi sono oggetti indirizzati per contenuto e `MANIFEST.txt` si scrive per
+ultimo: un push interrotto lascia valido il set precedente.
+
+Cosa entra si regola in `lib/manifest.sh` (`QUICK_INCLUDE`, `QUICK_EXCLUDES`,
+`QUICK_SPLIT`, `QUICK_TOOLS`); i file oltre `CONFSYNC_QUICK_MAX_FILE_MB`
+(default 5) restano fuori. Il token di `gh`, che sul desktop sta nel keyring,
+viaggia cifrato nel set: `CONFSYNC_NO_EXPORTS=1` per escluderlo.
+
+Limiti noti: 1Password e Chrome vogliono il loro login; `glab` recente cerca
+il token nel keyring e può chiedere `glab auth login`.
+
+---
 
 ## 🖥️ Console web
 
@@ -148,19 +166,35 @@ Cosa entra nel core si regola in `lib/manifest.sh` (`QUICK_INCLUDE`,
 bekky ui        # http://127.0.0.1:7842, solo locale, protetta da token
 ```
 
-Stato in una frase, storico degli ultimi 30 giorni, push e backup con log,
-hook e controlli (gcloud, bucket, passphrase), composizione del core. Il
-restore non si lancia da qui: sovrascrive la HOME. Per provarla con dati finti:
-`BEKKY_UI_MOCK=ok bekky ui` (scenari: `ok`, `reauth`, `stale`, `fresh`).
+Pensata per chi non apre il terminale:
+
+| Vista | Cosa ci fai |
+|---|---|
+| **Panoramica** | vedi se i dati sono al sicuro, lanci un salvataggio, segui l'avanzamento, accendi il salvataggio automatico |
+| **Cosa viene salvato** | peso e contenuto del salvataggio rapido, per categoria |
+| **Nuovo PC** | il comando da incollare, già compilato con il tuo bucket |
+| **Impostazioni** | cambi lo spazio di archiviazione in tre passi (scegli o crea, verifica, conferma), vedi dove sta la passphrase, tema chiaro/scuro |
+| **Registro** | log e salvataggi completi presenti nel bucket |
+
+Quando qualcosa non va (login gcloud scaduto, salvataggio fallito) la
+Panoramica mostra i passi per risolvere. Al primo avvio, senza bucket o
+passphrase, guida la configurazione.
+
+Il restore non si lancia da qui: sovrascrive la HOME. La passphrase non viene
+mai mostrata né esce dalle API. Per provarla con dati finti:
+`BEKKY_UI_MOCK=ok bekky ui` (scenari: `ok`, `reauth`, `stale`, `fresh`, `setup`).
 
 ---
 
 ## 🆘 Disaster recovery (macchina nuova / appena formattata)
 
+Per ripartire subito basta il [quick](#-quick-operativo-in-un-minuto-su-un-pc-vuoto). Questo è il
+ripristino completo, comprese repo, pacchetti e sistema.
+
 ```bash
 # installa openssl, zstd e google-cloud-sdk, poi:
 gcloud auth login
-git clone git@github.com:gerardocipriano/bekky.git ~/code/misc/bekky
+git clone https://github.com/gerardocipriano/bekky.git ~/code/misc/bekky
 cp ~/code/misc/bekky/config.example ~/.config/confsync/config && $EDITOR ...   # imposta il bucket
 
 cd ~/code/misc/bekky
@@ -178,6 +212,9 @@ ricorda i login gcloud. Idempotente.
 
 > 🔑 **La passphrase è l'unica cosa che bekky non può recuperare per te.** Custodiscila nel tuo
 > password manager: senza, i backup sono — *by design* — irrecuperabili.
+>
+> Su ogni macchina sta in `~/.config/confsync/passphrase` (0600); `CONFSYNC_OP_REF` indica la copia
+> in 1Password, da cui bekky la legge con `op` se il file manca.
 
 ---
 
@@ -205,6 +242,8 @@ Log dell'ultima esecuzione: `~/.config/confsync/last-run.log`.
 - **Integrità verificata**: ogni restore controlla gli SHA-256 in `MANIFEST.txt` prima di estrarre.
 - **Nessun dato di infrastruttura nel repo**: bucket, progetto e account vivono solo nella tua
   config locale (vedi `config.example`).
+- **Console web solo locale**: ascolta su `127.0.0.1`, richiede un token generato a ogni avvio,
+  rifiuta richieste con `Host` diverso ed esegue solo azioni predefinite.
 
 ---
 
@@ -220,6 +259,13 @@ Tutto in `~/.config/confsync/config` (vedi [`config.example`](config.example)):
 | `CONFSYNC_HOST_TAG` | `$(hostname)` | namespace del backup nel bucket |
 | `CONFSYNC_ZSTD_LEVEL` | `10` | livello di compressione zstd |
 | `CONFSYNC_RESTORE_TS` | contenuto di `latest` | timestamp del backup da ripristinare |
+| `CONFSYNC_QUICK_PREFIX` | `quick` | prefisso del set quick nel bucket |
+| `CONFSYNC_QUICK_MAX_FILE_MB` | `5` | tetto per file nel set quick |
+| `CONFSYNC_OP_REF` | `op://Personal/bekky passphrase/password` | riferimento 1Password della passphrase |
+
+Per cambiare bucket: console → Impostazioni → **Cambia spazio**, oppure modifica
+`CONFSYNC_BUCKET` nel file e lancia `./scripts/create-bucket.sh`. I backup
+vecchi restano nel bucket precedente; il primo salvataggio ricarica tutto nel nuovo.
 
 **Cosa viene incluso/escluso** si regola in [`lib/manifest.sh`](lib/manifest.sh):
 `INCLUDE_DOTFILES`, `EXCLUDE_PATTERNS`, `SECRET_PATHS`, `SECRET_PATTERNS`, `REPO_SCAN_DIRS`.

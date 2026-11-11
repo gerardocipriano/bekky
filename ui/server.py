@@ -41,8 +41,8 @@ if MOCK and MOCK not in SCENARIOS:
 CONFIG_PATH = os.environ.get("CONFSYNC_CONFIG") or os.path.join(CONF, "config")
 CONFIG_VARS = {"bucket": "CONFSYNC_BUCKET", "project": "CONFSYNC_PROJECT",
                "account": "CONFSYNC_ACCOUNT"}
-DEFAULTS = {"bucket": "gs://il-tuo-bucket", "project": "il-tuo-progetto",
-            "account": "tu@esempio.it"}
+# Nessun default: il repo e' pubblico, il comando per il PC nuovo porta sempre i valori correnti
+DEFAULTS = {"bucket": "", "project": "", "account": ""}
 OP_REF_DEFAULT = "op://Personal/bekky passphrase/password"
 BUCKET_RE = re.compile(r"gs://[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]")
 PROJECT_RE = re.compile(r"[a-z][a-z0-9-]{3,28}[a-z0-9]")

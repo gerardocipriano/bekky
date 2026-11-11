@@ -4,7 +4,7 @@ Istruzioni per l'agente che gira sul PC nuovo. L'utente ha già lanciato
 `scripts/bootstrap.sh`: sudo senza password (temporaneo), gcloud autenticato,
 passphrase in `~/.config/confsync/passphrase`, config in `~/.config/confsync/config`.
 
-Obiettivo: stesso ambiente del vecchio Manjaro (host `vecchio-pc`), senza fare
+Obiettivo: stesso ambiente del vecchio Manjaro (host in `CONFSYNC_HOST_TAG`), senza fare
 domande all'utente. Chiedi solo se un passo richiede davvero lui (GUI di
 1Password, login a servizi web, VPN). Per tutto il resto decidi da solo e annota.
 
@@ -19,7 +19,7 @@ domande all'utente. Chiedi solo se un passo richiede davvero lui (GUI di
   `restore-status.md` sotto "Da sistemare" e vai avanti.
 - `export CONFSYNC_PASSPHRASE="$(cat ~/.config/confsync/passphrase)"` in ogni
   shell che lancia confsync.
-- Profilo gcloud per bekky: `CLOUDSDK_CORE_ACCOUNT=tu@esempio.it`.
+- Profilo gcloud per bekky: `CLOUDSDK_CORE_ACCOUNT="$CONFSYNC_ACCOUNT"` (da `~/.config/confsync/config`).
 
 ## Fase 1: restore dei dati
 
@@ -218,7 +218,7 @@ okular, spectacle, ark, ...).
 
 Controlla ognuno e annota il risultato:
 1. `zsh -ic 'alias | wc -l'` restituisce gli alias, nessun errore all'avvio.
-2. `gcloud config configurations list` mostra i profili default/lavoro/cliente.
+2. `gcloud config configurations list` mostra gli stessi profili del vecchio PC.
 3. `kubectl config get-contexts` funziona.
 4. `claude mcp list`: agentmemory e codegraph connessi.
 5. `systemctl --user --failed` e `systemctl --failed` vuoti.
