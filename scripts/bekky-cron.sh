@@ -4,9 +4,11 @@
 # una notifica desktop (notify-send). Non-interattivo.
 set -uo pipefail
 
-DIR="$HOME/code/misc/bekky"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PASS_FILE="$HOME/.config/confsync/passphrase"
 LOG="$HOME/.config/confsync/last-run.log"
+# shellcheck disable=SC1091
+. "$DIR/lib/history.sh"
 
 # Ambiente per uso da cron (PATH ridotto). L'SDK sta in $HOME se installato da
 # tarball, in /usr/bin se dal pacchetto della distro: teniamo entrambi.
@@ -23,6 +25,7 @@ notify_fail() {
 
 if [ ! -r "$PASS_FILE" ]; then
   notify_fail "passphrase non leggibile in $PASS_FILE"
+  history_add full fail 0
   exit 1
 fi
 
@@ -33,6 +36,7 @@ if "$DIR/confsync" backup >"$LOG" 2>&1; then
   exit 0
 else
   rc=$?
+  history_add full fail 0
   notify_fail "exit code $rc"
   exit "$rc"
 fi

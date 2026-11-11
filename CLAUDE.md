@@ -11,6 +11,10 @@ Se l'utente dice che è sul PC nuovo e vuole il restore ("prendi il backup",
 senza chiedere conferme per le singole fasi. Il playbook dice quali sono le poche
 eccezioni. Se `~/.config/confsync/restore-status.md` esiste, riprendi da lì.
 
+Percorso rapido (solo Claude, tool e repo, niente pacchetti di sistema né
+desktop): `scripts/quick.sh`, vedi README. Il playbook resta per il restore
+completo.
+
 Se `~/.config/confsync/passphrase` o il login gcloud mancano, l'utente non ha
 lanciato il bootstrap: digli di eseguire
 `! curl -fsSL https://raw.githubusercontent.com/gerardocipriano/bekky/main/scripts/bootstrap.sh | bash`.
@@ -31,3 +35,12 @@ lanciato il bootstrap: digli di eseguire
   `npm`/`systemctl --user` presi dal PATH, si leggono nvm e i file su disco.
 - `~/.config/confsync` è stato della macchina (host tag, passphrase): mai nei
   dotfiles né sovrascritto dal restore.
+- Il set quick è indirizzato per contenuto (`quick/objects/<sha>`), con
+  `MANIFEST.txt` scritto per ultimo: un push interrotto non rompe il restore.
+  Dopo un cambio di passphrase va svuotato `$BUCKET/quick/`, altrimenti il
+  dedup riusa oggetti cifrati con la vecchia.
+- `gh` tiene il token nel keyring del desktop, che non si porta su un altro
+  PC: il quick lo esporta cifrato (`exports.tar.enc`). Nei test serve
+  `CONFSYNC_NO_EXPORTS=1`, perché gh legge il keyring della sessione, non HOME.
+- Non modificare `confsync` mentre gira: bash legge lo script a pezzi e un
+  edit a metà produce errori senza senso (`onfig: command not found`).

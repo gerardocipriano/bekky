@@ -111,3 +111,32 @@ ETC_SCAN=(
   /etc/NetworkManager/dispatcher.d /etc/profile.d /etc/environment.d
   /etc/security/limits.d /etc/modules-load.d /etc/tmpfiles.d /etc/sudoers.d
 )
+
+# --- Set "quick" (confsync backup/restore --quick) ---------------------------
+# Archivio core: il minimo per lavorare subito con Claude Code su un PC vuoto.
+QUICK_INCLUDE=(
+  .claude .claude.json CLAUDE.md .CLAUDE.md
+  .gitconfig .gitignore .zshrc .bashrc .profile .zprofile .aliases
+  .oh-my-zsh/custom .agents .opencode .config/opencode
+  .config/gcloud .config/gh .config/glab-cli .config/git .config/1Password/ssh
+  .terraformrc .tokenjuice
+  # solo script: i binari li taglia il tetto CONFSYNC_QUICK_MAX_FILE_MB
+  .local/bin scripts
+)
+# Path (relativi a HOME) potati dalla lista file del core: peso inutile subito
+# dopo il restore. Non sono pattern tar: la lista si genera con find.
+QUICK_EXCLUDES=(
+  .claude/projects .claude/file-history .claude/transcripts
+  .claude/shell-snapshots .claude/paste-cache .claude/session-env
+  .claude/jobs .claude/todos .claude/debug .claude/statsig .claude/telemetry
+  .tokenjuice/artifacts .opencode/bin .opencode/node_modules
+  .config/gcloud/logs .config/gcloud/virtenv .config/gcloud/cache
+)
+# Glob di dir che restano per intero anche dentro un QUICK_EXCLUDES: la
+# memoria di Claude vive in .claude/projects/<cwd>/memory
+QUICK_KEEP=( '.claude/projects/*/memory' )
+# Archivi separati dal core ("nome:prefisso" relativo a HOME): cambiano di rado,
+# cosi' non si ricaricano a ogni sessione. Una lista file e un .tar.enc ciascuno.
+QUICK_SPLIT=( 'plugins:.claude/plugins' )
+# Tool installati da scripts/quick-tools.sh (una funzione tool_<nome> ciascuno)
+QUICK_TOOLS=( node rtk uv opencode gcloud terraform kubectl gh glab jq op )

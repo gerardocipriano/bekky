@@ -110,6 +110,51 @@ in `~/.config/confsync/pre-restore/`.
 
 ---
 
+## ⚡ Quick: operativo in un minuto su un PC vuoto
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gerardocipriano/bekky/main/scripts/quick.sh | bash
+# senza curl (Ubuntu desktop):  wget -qO- <stesso URL> | bash
+```
+
+Chiede due cose, una dopo l'altra: la passphrase e il login gcloud. Poi:
+
+1. ripristina config e memoria di Claude Code, plugin, skill, shell, git, profili
+   gcloud e i secrets (chiavi SSH, credenziali gcloud, kube, token gh);
+2. installa Claude Code;
+3. in background installa i tool in `~/.local/bin`, senza sudo (node + npm
+   globali, rtk, uv, opencode, gcloud, terraform, kubectl, gh, glab, jq, op) e
+   clona le repo di `~/code`.
+
+Stato e log: `~/.config/confsync/quick-logs/`. Commit non pushati, stash e file
+non versionati delle repo arrivano dopo, dal backup completo:
+`bekky restore --yes --no-dotfiles --repos`.
+
+Il set quick (~65 MB) vive in `$BUCKET/quick/`, non dipende dall'hostname e si
+aggiorna con:
+
+```bash
+bekky backup --quick             # carica solo gli archivi cambiati
+./scripts/install-hooks.sh       # lo fa da solo a ogni fine sessione di Claude Code
+```
+
+Cosa entra nel core si regola in `lib/manifest.sh` (`QUICK_INCLUDE`,
+`QUICK_EXCLUDES`, `QUICK_SPLIT`, `QUICK_TOOLS`); i file oltre
+`CONFSYNC_QUICK_MAX_FILE_MB` (default 5) restano fuori.
+
+## 🖥️ Console web
+
+```bash
+bekky ui        # http://127.0.0.1:7842, solo locale, protetta da token
+```
+
+Stato in una frase, storico degli ultimi 30 giorni, push e backup con log,
+hook e controlli (gcloud, bucket, passphrase), composizione del core. Il
+restore non si lancia da qui: sovrascrive la HOME. Per provarla con dati finti:
+`BEKKY_UI_MOCK=ok bekky ui` (scenari: `ok`, `reauth`, `stale`, `fresh`).
+
+---
+
 ## 🆘 Disaster recovery (macchina nuova / appena formattata)
 
 ```bash
@@ -196,9 +241,16 @@ shellcheck confsync lib/*.sh scripts/*.sh
 bekky/
 ├── confsync                 # lo script (tutta la logica)
 ├── lib/manifest.sh          # cosa includere/escludere/cifrare
+├── lib/tools.sh             # installer userland condivisi
 ├── scripts/
 │   ├── create-bucket.sh     # provisioning del bucket GCS
-│   └── bekky-cron.sh        # wrapper per il cron + notifica
+│   ├── bekky-cron.sh        # wrapper per il cron + notifica
+│   ├── quick.sh             # one-liner per il PC vuoto
+│   ├── quick-tools.sh       # tool in ~/.local/bin
+│   ├── quick-repos.sh       # clone parallelo delle repo
+│   ├── quick-push.sh        # push del set quick (hook SessionEnd)
+│   └── install-hooks.sh     # installa/rimuove l'hook
+├── ui/                      # console web locale (Python stdlib + JS vanilla)
 ├── test/                    # suite bats
 ├── config.example           # template di configurazione
 └── docs/                    # design & implementation plan

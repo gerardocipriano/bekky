@@ -19,6 +19,9 @@ require_bucket() {
   [ -n "$BUCKET" ] || die "CONFSYNC_BUCKET non impostato (crea $CONFSYNC_CONFIG da config.example)"
 }
 
+# shellcheck source=lib/history.sh
+. "$SCRIPT_DIR/lib/history.sh"
+
 # Source manifest (fallback embedded minimale se assente)
 if [ -f "$SCRIPT_DIR/lib/manifest.sh" ]; then
   # shellcheck source=lib/manifest.sh
@@ -327,8 +330,25 @@ require_deps() {
   [ ${#missing[@]} -eq 0 ] || die "dipendenze mancanti: ${missing[*]} (installa: openssl, zstd, google-cloud-sdk)"
 }
 
-_comp_cmd()   { echo "zstd -${CONFSYNC_ZSTD_LEVEL:-10} -T0"; }
-_decomp_cmd() { echo "zstd -d"; }
+# Come require_deps ma con l'elenco di comandi del chiamante
+require_cmds() {
+  local missing=() d
+  for d in "$@"; do
+    if [ "${CONFSYNC_FAKE_MISSING:-}" = "$d" ] || ! command -v "$d" >/dev/null 2>&1; then
+      missing+=("$d")
+    fi
+  done
+  [ ${#missing[@]} -eq 0 ] || die "dipendenze mancanti: ${missing[*]}"
+}
+
+# Il set quick usa gzip (CONFSYNC_COMP=gzip): sul PC vuoto non c'e' zstd
+_comp_cmd() {
+  if [ "${CONFSYNC_COMP:-zstd}" = gzip ]; then echo "gzip -n -6"
+  else echo "zstd -${CONFSYNC_ZSTD_LEVEL:-10} -T0"; fi
+}
+_decomp_cmd() {
+  if [ "${CONFSYNC_COMP:-zstd}" = gzip ]; then echo "gzip -d"; else echo "zstd -d"; fi
+}
 
 # tar che scrive l'archivio su stdout tollerando exit 1 (file cambiati/illeggibili
 # durante la lettura: warning, non errore fatale). Exit >=2 resta fatale.
@@ -365,8 +385,14 @@ pack_encrypt() {
   local src="$1" out="$2"; shift 2
   local pass; pass="$(get_passphrase)"
   local existing=(); local p
-  for p in "$@"; do [ -e "$src/$p" ] && existing+=("$p"); done
-  [ ${#existing[@]} -gt 0 ] || { log "nessun path da archiviare per $out"; return 0; }
+  if [ -n "${PACK_LIST:-}" ]; then
+    # PACK_LIST: file con un path per riga (relativo a $src), gia' ordinato
+    [ -s "$PACK_LIST" ] || { log "nessun path da archiviare per $out"; return 0; }
+    existing=(--no-recursion -T "$PACK_LIST")
+  else
+    for p in "$@"; do [ -e "$src/$p" ] && existing+=("$p"); done
+    [ ${#existing[@]} -gt 0 ] || { log "nessun path da archiviare per $out"; return 0; }
+  fi
   # tar normalizzato (deterministico: ordine+mtime+owner fissi) così lo stream è
   # identico run-to-run a contenuto invariato. Lo SHA del contenuto compresso è
   # calcolato PRIMA della cifratura (openssl usa salt casuale -> i .enc non sono
@@ -615,6 +641,7 @@ verify_manifest() {
 }
 
 cmd_backup() {
+  if [ "${1:-}" = --quick ]; then shift; cmd_backup_quick "$@"; return; fi
   require_deps; require_bucket; resolve_passphrase
   local ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
   local work; work="${CONFSYNC_WORKDIR_KEEP:-$(mktemp -d)}"; mkdir -p "$work"
@@ -716,10 +743,12 @@ cmd_backup() {
   local newsha oldsha; newsha="$(cat "$work/BUNDLE.sha")"; oldsha="$(gcs_latest_sha)"
   if [ "$newsha" = "$oldsha" ] && [ -n "$oldsha" ]; then
     log "nessuna modifica dall'ultimo backup — skip upload (dedup)"
+    history_add full dedup "$(history_dir_bytes "$work")"
     return 0
   fi
   log "upload -> $BUCKET/$HOSTNAME_TAG/$ts/"
   gcs_upload "$work" "$ts"
+  history_add full upload "$(history_dir_bytes "$work")"
   log "backup completato: $ts"
 }
 
@@ -874,6 +903,10 @@ restore_repo() {
 }
 
 cmd_restore() {
+  local a
+  for a in "$@"; do
+    if [ "$a" = --quick ]; then cmd_restore_quick "$@"; return; fi
+  done
   require_deps; require_bucket
   local do_secrets=0 do_repos=0 do_pkgs=0 do_dotfiles=1 dryrun=0 assume_yes=0
   while [ $# -gt 0 ]; do case "$1" in
@@ -1000,6 +1033,309 @@ cmd_restore() {
   log "restore completato"
 }
 
+# --- Set quick: backup/restore del minimo per lavorare subito ----------------
+# Prefisso fisso (non per host): il PC nuovo non conosce l'host tag.
+# Dipendenze del restore: solo bash, curl, tar, gzip, openssl.
+
+# Sottoinsieme "dev" dell'inventario, riusando le funzioni _inv_*
+collect_inventory_dev() {
+  local dest="$1"
+  mkdir -p "$dest/dev" 2>/dev/null || true
+  _inv_capture "$dest/dev/npm-global.txt"   _inv_npm_global
+  _inv_capture "$dest/dev/nvm-versions.txt" _inv_ls "$HOME/.nvm/versions/node"
+  _inv_capture "$dest/dev/nvm-default.txt"  _inv_cat "$HOME/.nvm/alias/default"
+  _inv_cmd     "$dest/dev/pipx.txt"         pipx list --short
+  _inv_capture "$dest/dev/uv-tools.txt"     _inv_uv_tool_list
+  return 0
+}
+
+# Path del core (relativi a HOME, ordinati): QUICK_INCLUDE meno QUICK_EXCLUDES,
+# piu' QUICK_KEEP. Lista da find e non --exclude di tar: gli exclude matchano
+# su qualunque suffisso e non permettono "tutto tranne X, ma X/memory si".
+quick_list_files() {
+  local p e g d prune=()
+  for e in "${QUICK_EXCLUDES[@]}"; do prune+=(-path "$HOME/$e" -prune -o); done
+  {
+    for p in "${QUICK_INCLUDE[@]}"; do
+      [ -e "$HOME/$p" ] || [ -L "$HOME/$p" ] || continue
+      # Tetto sulla dimensione: i binari scaricati (opencode, k9s, ...) da soli
+      # portavano il core a 1 GB, e li reinstalla quick-tools.sh
+      find "$HOME/$p" "${prune[@]}" \( -type f -size +"${CONFSYNC_QUICK_MAX_FILE_MB:-5}"M \) -o -print 2>/dev/null || true
+    done
+    for g in "${QUICK_KEEP[@]}"; do
+      while IFS= read -r d; do
+        find "$d" -print 2>/dev/null || true
+      done < <(compgen -G "$HOME/$g" || true)
+    done
+  } | awk -v h="$HOME/" 'index($0, h) == 1 { print substr($0, length(h) + 1) }' \
+    | LC_ALL=C sort -u
+}
+
+# Divide la lista completa dei path (stdin) secondo QUICK_SPLIT ("nome:prefisso"):
+# scrive $1/<nome>.list per ogni split e $1/core.list col resto.
+quick_split_lists() {
+  local dir="$1" spec name prefix
+  mkdir -p "$dir"
+  cat > "$dir/core.list"
+  for spec in "${QUICK_SPLIT[@]}"; do
+    name="${spec%%:*}"; prefix="${spec#*:}"
+    awk -v p="$prefix" '$0 == p || index($0, p "/") == 1' "$dir/core.list" > "$dir/$name.list"
+    awk -v p="$prefix" '!($0 == p || index($0, p "/") == 1)' "$dir/core.list" > "$dir/core.list.new"
+    mv "$dir/core.list.new" "$dir/core.list"
+  done
+}
+
+# Righe "nome oggetto sha-del-cifrato" del MANIFEST in $1 (formato vedi cmd_backup_quick)
+_manifest_obj_sha() { awk -v o="$2" '$2 == o { print $3; exit }' "$1"; }
+
+cmd_backup_quick() {
+  local CONFSYNC_COMP=gzip
+  require_cmds tar openssl gzip gsutil; require_bucket
+  local cdir="$HOME/.config/confsync" prefix="${CONFSYNC_QUICK_PREFIX:-quick}"
+  mkdir -p "$cdir"
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$cdir/quick.lock"
+    flock -n 9 || { log "backup quick gia' in corso: esco"; return 0; }
+  fi
+  resolve_passphrase
+  local work; work="${CONFSYNC_WORKDIR_KEEP:-$(mktemp -d)}"; mkdir -p "$work"
+  # shellcheck disable=SC2064  # espansione immediata voluta: $work fuori scope all'EXIT
+  [ -n "${CONFSYNC_WORKDIR_KEEP:-}" ] || trap "rm -rf '$work'" EXIT
+
+  local spec name
+  quick_list_files | quick_split_lists "$work/.lists"
+  for spec in "${QUICK_SPLIT[@]}" core; do
+    name="${spec%%:*}"
+    log "quick: $name"
+    PACK_DOTFILES=1 PACK_LIST="$work/.lists/$name.list" pack_encrypt "$HOME" "$work/$name.tar.enc"
+  done
+  rm -rf "$work/.lists"
+  log "quick: secrets"
+  pack_encrypt "$HOME" "$work/secrets.tar.enc" "${SECRET_PATHS[@]}"
+  # Token che su questa macchina vivono nel keyring del desktop (gh): il
+  # keyring non si porta su un altro PC, quindi il token viaggia qui, cifrato.
+  local expstage="$work/.exp" tok
+  mkdir -p "$expstage"; chmod 700 "$expstage"
+  if [ -z "${CONFSYNC_NO_EXPORTS:-}" ] && command -v gh >/dev/null 2>&1 \
+     && tok="$(gh auth token 2>/dev/null)" && [ -n "$tok" ]; then
+    ( umask 077; printf '%s\n' "$tok" > "$expstage/gh-token" )
+  fi
+  if [ -n "$(ls -A "$expstage")" ]; then pack_encrypt "$expstage" "$work/exports.tar.enc" .; fi
+  rm -rf "$expstage"
+  log "quick: inventario dev"
+  local invstage="$work/.inv"; mkdir -p "$invstage"
+  collect_inventory_dev "$invstage"
+  pack_encrypt "$invstage" "$work/inventory.tar.enc" .
+  rm -rf "$invstage"
+  collect_repos "$work/repos.manifest.json"
+  printf '%s' "$HOME" > "$work/origin.home"
+
+  # Oggetti indirizzati per contenuto: gli archivi per sha pre-cifratura (i .enc
+  # hanno salt casuale, quindi lo sha del file cifrato cambia a ogni run), i file
+  # in chiaro per il loro sha. Le repo una per riga e ordinate: l'ordine di find
+  # non e' garantito. MANIFEST.txt e' l'unico nome fisso e si scrive per ultimo:
+  # un upload interrotto lascia il MANIFEST vecchio e il restore resta coerente.
+  local remote="$work/.remote.manifest" f obj encsha uploaded=0 sz
+  GSUTIL cat "$BUCKET/$prefix/MANIFEST.txt" > "$remote" 2>/dev/null || : > "$remote"
+  local reposha
+  reposha="$({ grep -o '{[^}]*}' "$work/repos.manifest.json" || true; } | LC_ALL=C sort | sha256sum | awk '{print $1}')"
+  : > "$work/MANIFEST.txt"
+  local todo=()
+  for f in "$work"/*.tar.enc "$work/repos.manifest.json" "$work/origin.home"; do
+    [ -f "$f" ] || continue
+    name="$(basename "$f")"
+    case "$name" in
+      *.tar.enc) obj="objects/$(cat "$f.contentsha").enc" ;;
+      repos.manifest.json) obj="objects/$reposha" ;;
+      *) obj="objects/$(sha256_of "$f")" ;;
+    esac
+    encsha="$(_manifest_obj_sha "$remote" "$obj")"
+    if [ -z "$encsha" ]; then
+      encsha="$(sha256_of "$f")"
+      todo+=("$f|$obj")
+    fi
+    printf '%s %s %s\n' "$name" "$obj" "$encsha" >> "$work/MANIFEST.txt"
+  done
+
+  if [ ${#todo[@]} -eq 0 ] && [ "$(LC_ALL=C sort "$work/MANIFEST.txt")" = "$(LC_ALL=C sort "$remote")" ]; then
+    log "quick: nessuna modifica dall'ultimo backup, skip upload (dedup)"
+    history_add quick dedup 0
+    return 0
+  fi
+  log "quick: upload -> $BUCKET/$prefix/ (${#todo[@]} oggetti nuovi)"
+  local item
+  for item in "${todo[@]}"; do
+    f="${item%%|*}"; obj="${item#*|}"
+    GSUTIL cp "$f" "$BUCKET/$prefix/$obj" >/dev/null
+    sz="$(stat -c %s "$f")"; uploaded=$((uploaded + sz))
+  done
+  GSUTIL cp "$work/MANIFEST.txt" "$BUCKET/$prefix/MANIFEST.txt" >/dev/null
+  uploaded=$((uploaded + $(stat -c %s "$work/MANIFEST.txt")))
+  history_add quick upload "$uploaded"
+
+  # Pulizia best effort degli oggetti non piu' referenziati
+  local url orphans=()
+  while IFS= read -r url; do
+    case "$url" in */objects/*) ;; *) continue ;; esac
+    grep -q " objects/${url##*/} " "$work/MANIFEST.txt" || orphans+=("$url")
+  done < <(GSUTIL ls "$BUCKET/$prefix/objects/" 2>/dev/null || true)
+  if [ ${#orphans[@]} -gt 0 ]; then
+    GSUTIL rm "${orphans[@]}" >/dev/null 2>&1 || log "quick: pulizia degli oggetti orfani non riuscita (ignoro)"
+  fi
+  log "quick: backup completato"
+}
+
+_urlenc() {
+  local s="$1" i c out=''
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [A-Za-z0-9._~-]) out+="$c" ;;
+      *) out+="$(printf '%%%02X' "'$c")" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# quick_fetch <nome> <dest>: legge QUICK_TRANSPORT/QUICK_* dal chiamante
+quick_fetch() {
+  local name="$1" dest="$2"
+  case "$QUICK_TRANSPORT" in
+    src) curl -fsS "$QUICK_SRC/$name" -o "$dest" ;;
+    gcloud)
+      # il token passa da stdin (-K -): sulla riga di comando lo vedrebbe ps
+      printf 'header = "Authorization: Bearer %s"\n' "$QUICK_TOKEN" \
+        | curl -fsS -K - -o "$dest" \
+            "${CONFSYNC_GCS_URL:-https://storage.googleapis.com}/storage/v1/b/$QUICK_BUCKET/o/$(_urlenc "$QUICK_PREFIX/$name")?alt=media" ;;
+    gsutil) GSUTIL cp "$BUCKET/$QUICK_PREFIX/$name" "$dest" >/dev/null 2>&1 ;;
+  esac
+}
+
+cmd_restore_quick() {
+  local CONFSYNC_COMP=gzip assume_yes=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --quick) ;; --yes) assume_yes=1 ;;
+    *) die "flag sconosciuta con --quick: $1" ;;
+  esac; shift; done
+  local cdir="$HOME/.config/confsync"
+  local QUICK_PREFIX="${CONFSYNC_QUICK_PREFIX:-quick}" QUICK_TRANSPORT QUICK_SRC="${CONFSYNC_QUICK_SRC:-}"
+  local QUICK_BUCKET="" QUICK_TOKEN=""
+  if [ -n "$QUICK_SRC" ]; then
+    QUICK_TRANSPORT=src
+    require_cmds tar openssl gzip curl
+  else
+    require_bucket
+    QUICK_BUCKET="${BUCKET#gs://}"; QUICK_BUCKET="${QUICK_BUCKET%%/*}"
+    # token da gcloud + curl sull'API JSON; senza gcloud (o senza login) gsutil
+    if command -v gcloud >/dev/null 2>&1 \
+       && QUICK_TOKEN="$(gcloud auth print-access-token ${CONFSYNC_ACCOUNT:+--account="$CONFSYNC_ACCOUNT"} 2>/dev/null)" \
+       && [ -n "$QUICK_TOKEN" ]; then
+      QUICK_TRANSPORT=gcloud
+      require_cmds tar openssl gzip curl
+    else
+      QUICK_TRANSPORT=gsutil
+      require_cmds tar openssl gzip curl gsutil
+    fi
+  fi
+
+  local work; work="$(mktemp -d)"
+  # shellcheck disable=SC2064  # espansione immediata voluta: $work fuori scope all'EXIT
+  trap "rm -rf '$work'" EXIT
+
+  log "quick: scarico il set ($QUICK_TRANSPORT)"
+  quick_fetch MANIFEST.txt "$work/MANIFEST.txt" || die "download di MANIFEST.txt fallito"
+  # Righe "nome oggetto sha". Nome e oggetto vengono dal bucket: formato
+  # rigido, niente path fuori dalla work dir.
+  local lname obj sha f pids=() names=() i
+  while read -r lname obj sha; do
+    [ -n "$lname" ] || continue
+    [[ "$lname" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && [[ "$lname" != *..* ]] \
+      || die "nome non valido nel MANIFEST: $lname"
+    [[ "$obj" =~ ^objects/[0-9a-f]{64}(\.enc)?$ ]] || die "oggetto non valido nel MANIFEST: $obj"
+    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "sha non valido nel MANIFEST per $lname"
+    quick_fetch "$obj" "$work/$lname" & pids+=($!); names+=("$lname")
+  done < "$work/MANIFEST.txt"
+  for i in "${!pids[@]}"; do
+    wait "${pids[$i]}" || die "download di ${names[$i]} fallito"
+  done
+  while read -r lname obj sha; do
+    [ -n "$lname" ] || continue
+    [ -f "$work/$lname" ] || die "file mancante nel download: $lname"
+    [ "$(sha256_of "$work/$lname")" = "$sha" ] || die "checksum non valido per $lname"
+  done < "$work/MANIFEST.txt"
+
+  resolve_passphrase
+  if [ $assume_yes -eq 0 ]; then
+    read -rp "Sovrascrivo i dotfiles in $HOME? [y/N] " a; [ "$a" = y ] || die "annullato"
+  fi
+  mkdir -p "$cdir"; chmod 700 "$cdir"
+
+  local pre="$cdir/pre-restore" changed=()
+  mkdir -p "$pre"
+  for f in "${SHELL_INIT_FILES[@]}"; do
+    [ -f "$HOME/$f" ] && [ ! -e "$pre/$f" ] && cp -a "$HOME/$f" "$pre/$f"
+  done
+  # Un login Claude gia' presente si sovrascrive senza problemi: nel flusso
+  # quick Claude non e' ancora stato avviato.
+  # prima gli split (plugins, ...), poi core: in caso di sovrapposizione vince il core
+  local spec
+  for spec in "${QUICK_SPLIT[@]}" core; do
+    f="${spec%%:*}.tar.enc"
+    [ -f "$work/$f" ] || continue
+    decrypt_unpack "$work/$f" "$HOME" --exclude=.config/confsync
+    log "${f%.tar.enc} ripristinato"
+  done
+  for f in "${SHELL_INIT_FILES[@]}"; do
+    [ -f "$pre/$f" ] && ! cmp -s "$pre/$f" "$HOME/$f" && changed+=("$f")
+  done
+  if [ ${#changed[@]} -gt 0 ]; then
+    log "ATTENZIONE: sovrascritti ${changed[*]} (originali in $pre)"
+    log "controlla che il PATH abbia ancora ~/.local/bin e gli altri path della distro"
+  fi
+
+  if [ -f "$work/secrets.tar.enc" ]; then
+    decrypt_unpack "$work/secrets.tar.enc" "$HOME" --exclude=.config/confsync
+    chmod -R go-rwx "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.secrets" 2>/dev/null || true
+    for f in .netrc .pgpass .git-credentials .npmrc .pypirc .claude/.credentials.json .config/gh/hosts.yml; do
+      [ -f "$HOME/$f" ] && chmod 600 "$HOME/$f"
+    done
+    log "secrets ripristinati (permessi 600)"
+  fi
+
+  if [ -f "$work/inventory.tar.enc" ]; then
+    rm -rf "$cdir/inventory-quick"
+    decrypt_unpack "$work/inventory.tar.enc" "$cdir/inventory-quick"
+    log "inventario dev in $cdir/inventory-quick"
+  fi
+  mkdir -p "$cdir/quick"
+  if [ -f "$work/exports.tar.enc" ]; then
+    # consumati e cancellati da scripts/quick-tools.sh (gh auth login)
+    rm -rf "$cdir/quick/exports"
+    ( umask 077; decrypt_unpack "$work/exports.tar.enc" "$cdir/quick/exports" )
+    chmod -R go-rwx "$cdir/quick/exports"
+  fi
+  [ ! -f "$work/repos.manifest.json" ] || cp "$work/repos.manifest.json" "$cdir/quick/repos.manifest.json"
+  if [ -f "$work/origin.home" ]; then
+    cp "$work/origin.home" "$cdir/quick/origin.home"
+    cp "$work/origin.home" "$cdir/origin.home"
+    if [ "$(cat "$work/origin.home")" != "$HOME" ]; then
+      log "ATTENZIONE: backup creato con HOME=$(cat "$work/origin.home"), qui e' $HOME"
+      log "i path assoluti nelle config vanno riscritti: ./scripts/rehome.sh"
+    fi
+  fi
+  log "restore quick completato"
+}
+
+# Lista file del core (quella che finisce in core.tar.enc), un path per riga
+cmd_quick_list() { quick_list_files; }
+
+# Console web locale (ui/server.py): i dati di infrastruttura arrivano dalla config
+cmd_ui() {
+  command -v python3 >/dev/null 2>&1 || die "serve python3"
+  CONFSYNC_BUCKET="$BUCKET" CONFSYNC_HOST_TAG="$HOSTNAME_TAG" CONFSYNC_ACCOUNT="${CONFSYNC_ACCOUNT:-}" \
+    exec python3 "$SCRIPT_DIR/ui/server.py" "$@"
+}
+
 cmd_list() {
   require_deps; require_bucket
   GSUTIL ls "$BUCKET/$HOSTNAME_TAG/" 2>/dev/null || die "nessun backup"
@@ -1021,8 +1357,11 @@ cmd_diff() {
 
 usage() { cat >&2 <<EOF
 confsync — backup/restore cifrato delle config OS
-  confsync backup
+  confsync backup [--quick]
   confsync restore [--secrets] [--repos] [--packages] [--no-dotfiles] [--dry-run]
+  confsync restore --quick [--yes]   core + secrets + inventario dev, solo curl/tar/gzip/openssl
+  confsync quick-list                lista file del core (path relativi a HOME)
+  confsync ui [--port N] [--no-open] console web locale su 127.0.0.1
   confsync list
   confsync diff
 EOF
@@ -1035,8 +1374,10 @@ main() {
     restore) shift; cmd_restore "$@" ;;
     list)    shift; cmd_list "$@" ;;
     diff)    shift; cmd_diff "$@" ;;
+    quick-list) shift; cmd_quick_list "$@" ;;
+    ui)      shift; cmd_ui "$@" ;;
     ""|-h|--help) usage ;;
-    *) die "comando sconosciuto: $1 (usa: backup|restore|list|diff)" ;;
+    *) die "comando sconosciuto: $1 (usa: backup|restore|list|diff|quick-list|ui)" ;;
   esac
 }
 
