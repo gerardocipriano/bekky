@@ -1049,6 +1049,36 @@ collect_inventory_dev() {
   return 0
 }
 
+# File di progetto (QUICK_CODE_FILES/DIRS) sotto i REPO_SCAN_DIRS. Un solo find
+# per dir di scansione, con prune precoce: ~/code e' grande. Le dir trovate si
+# espandono a parte, cosi' il tetto vale anche per il loro contenuto. Tetto a
+# parte (KB) e piu' basso del core: screenshot e report in handoff/ pesano
+# centinaia di MB e non servono per ripartire.
+quick_list_code() {
+  local d f n ed kb="${CONFSYNC_QUICK_CODE_MAX_FILE_KB:-1024}"
+  local junk=(.git node_modules .terraform .venv venv worktrees dist build .cache)
+  local prune=() names=() dnames=() jn=() skip=()
+  for n in "${QUICK_CODE_SKIP_EXT[@]}"; do skip+=(-o -iname "*.$n"); done
+  for n in "${junk[@]}"; do jn+=(-name "$n" -o); done
+  for ed in "${CODE_EXCLUDE_DIRS[@]}"; do prune+=(-path "$HOME/$ed" -prune -o); done
+  prune+=( -type d \( "${jn[@]}" -false \) -prune -o )
+  for n in "${QUICK_CODE_FILES[@]}"; do names+=(-name "$n" -o); done
+  for n in "${QUICK_CODE_DIRS[@]}"; do dnames+=(-name "$n" -o); done
+  for d in "${REPO_SCAN_DIRS[@]}"; do
+    [ -d "$d" ] || continue
+    while IFS= read -r -d '' f; do
+      if [ -d "$f" ]; then
+        find "$f" "${prune[@]}" \( -type f \( -size +"${kb}"k "${skip[@]}" \) \) -o -print 2>/dev/null || true
+      else
+        printf '%s\n' "$f"
+      fi
+    done < <(find "$d" "${prune[@]}" \
+      \( -type d \( "${dnames[@]}" -false \) -print0 -prune \) -o \
+      \( -type f \( "${names[@]}" -false \) ! -size +"${kb}"k -print0 \) 2>/dev/null)
+  done
+  return 0
+}
+
 # Path del core (relativi a HOME, ordinati): QUICK_INCLUDE meno QUICK_EXCLUDES,
 # piu' QUICK_KEEP. Lista da find e non --exclude di tar: gli exclude matchano
 # su qualunque suffisso e non permettono "tutto tranne X, ma X/memory si".
@@ -1067,6 +1097,7 @@ quick_list_files() {
         find "$d" -print 2>/dev/null || true
       done < <(compgen -G "$HOME/$g" || true)
     done
+    quick_list_code
   } | awk -v h="$HOME/" 'index($0, h) == 1 { print substr($0, length(h) + 1) }' \
     | LC_ALL=C sort -u
 }

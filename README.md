@@ -261,6 +261,7 @@ Tutto in `~/.config/confsync/config` (vedi [`config.example`](config.example)):
 | `CONFSYNC_RESTORE_TS` | contenuto di `latest` | timestamp del backup da ripristinare |
 | `CONFSYNC_QUICK_PREFIX` | `quick` | prefisso del set quick nel bucket |
 | `CONFSYNC_QUICK_MAX_FILE_MB` | `5` | tetto per file nel set quick |
+| `CONFSYNC_QUICK_CODE_MAX_FILE_KB` | `1024` | tetto per file dei progetti sotto `~/code` (archivio `code`); le estensioni media in `QUICK_CODE_SKIP_EXT` restano fuori dal quick |
 | `CONFSYNC_OP_REF` | `op://Personal/bekky passphrase/password` | riferimento 1Password della passphrase |
 
 Per cambiare bucket: console → Impostazioni → **Cambia spazio**, oppure modifica

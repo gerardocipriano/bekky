@@ -189,6 +189,68 @@ unpack() {
   [[ "$output" == *"CLAUDE.md"* ]]
 }
 
+@test "quick-list: file di progetto sotto ~/code, con prune di junk, worktrees ed exclude" {
+  tmp="$(mktemp -d)"; h="$tmp/home"; make_quick_fixture "$h"
+  mkdir -p "$h/code/cli/handoff/T-1" "$h/code/cli/repo/.git" "$h/code/cli/repo/.claude/worktrees/x" \
+           "$h/code/cli/repo/node_modules/p" "$h/code/archivio/o" "$h/code/cli/repo/src"
+  echo a > "$h/code/cli/CLAUDE.md"
+  echo b > "$h/code/cli/handoff/T-1/STATUS.md"
+  echo c > "$h/code/cli/repo/CLAUDE.local.md"
+  echo d > "$h/code/cli/repo/.claude/settings.local.json"
+  echo e > "$h/code/cli/repo/.claude/worktrees/x/f.txt"
+  echo f > "$h/code/cli/repo/node_modules/p/CLAUDE.md"
+  echo g > "$h/code/cli/repo/.git/CLAUDE.md"
+  echo h > "$h/code/archivio/o/CLAUDE.md"
+  echo i > "$h/code/cli/repo/src/main.c"
+  head -c 2097152 /dev/zero > "$h/code/cli/handoff/T-1/shot.png"
+  echo x > "$h/code/cli/handoff/T-1/piccola.PNG"
+  run env HOME="$h" CONFSYNC_CONFIG=/dev/null CONFSYNC_CODE_EXCLUDE_DIRS="code/archivio" \
+      bash "$CONFSYNC" quick-list
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'\ncode/cli/CLAUDE.md\n'* ]]
+  [[ "$output" == *"code/cli/handoff/T-1/STATUS.md"* ]]
+  [[ "$output" == *"code/cli/repo/CLAUDE.local.md"* ]]
+  [[ "$output" == *"code/cli/repo/.claude/settings.local.json"* ]]
+  [[ "$output" != *"worktrees"* ]]
+  [[ "$output" != *"node_modules"* ]]
+  [[ "$output" != *"code/cli/repo/.git"* ]]
+  [[ "$output" != *"archivio"* ]]
+  [[ "$output" != *"main.c"* ]]
+  [[ "$output" != *"shot.png"* ]]
+  [[ "$output" != *"piccola.PNG"* ]]
+  # i media restano fuori anche sotto il tetto (estensione, senza badare alle maiuscole)
+  run env HOME="$h" CONFSYNC_CONFIG=/dev/null CONFSYNC_QUICK_CODE_MAX_FILE_KB=4096 \
+      bash "$CONFSYNC" quick-list
+  [[ "$output" != *"code/cli/handoff/T-1/shot.png"* ]]
+}
+
+@test "quick_split_lists: i path sotto code/ vanno in code.list, il resto resta nel core" {
+  tmp="$(mktemp -d)"; h="$tmp/home"; make_quick_fixture "$h"
+  mkdir -p "$h/code/cli"; echo a > "$h/code/cli/CLAUDE.md"
+  run env HOME="$h" CONFSYNC_CONFIG=/dev/null bash -c \
+    'source "$0" --source-only; quick_list_files | quick_split_lists "$1"' "$CONFSYNC" "$tmp/l"
+  [ "$status" -eq 0 ]
+  [ -f "$tmp/l/code.list" ]
+  grep -Fxq code/cli/CLAUDE.md "$tmp/l/code.list"
+  ! grep -q '^code/' "$tmp/l/core.list"
+  grep -Fxq CLAUDE.md "$tmp/l/core.list"
+}
+
+@test "opencode: auth.json nei secrets e negli exclude dei dotfiles, mai nel core quick" {
+  tmp="$(mktemp -d)"; h="$tmp/home"; make_quick_fixture "$h"
+  mkdir -p "$h/.local/share/opencode" "$h/.local/state/opencode"
+  echo '{"k":1}' > "$h/.local/share/opencode/auth.json"
+  echo '{"m":1}' > "$h/.local/state/opencode/model.json"
+  run env HOME="$h" CONFSYNC_CONFIG=/dev/null bash "$CONFSYNC" quick-list
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"opencode/auth.json"* ]]
+  [[ "$output" == *".local/state/opencode/model.json"* ]]
+  run env HOME="$h" bash -c 'source "$0" --source-only
+    printf "%s\n" "${SECRET_PATHS[@]}" | grep -Fx .local/share/opencode/auth.json &&
+    printf "%s\n" "${DOTFILES_ONLY_EXCLUDES[@]}" | grep -Fx .local/share/opencode/auth.json' "$CONFSYNC"
+  [ "$status" -eq 0 ]
+}
+
 @test "backup --quick: prefisso CONFSYNC_QUICK_PREFIX e lock occupato" {
   tmp="$(mktemp -d)"; make_quick_fixture "$tmp/home"
   mkdir -p "$tmp/bucket" "$tmp/bin"; make_fs_gsutil "$tmp/bin" "$tmp/bucket"
@@ -290,7 +352,11 @@ JSON
   SECONDS=0
   echo '{"hook":"SessionEnd"}' | env HOME="$tmp/home" CONFSYNC_BUCKET=gs://testbucket PATH="$tmp/bin:$PATH" bash "$push"
   [ "$SECONDS" -lt 3 ]
-  for i in $(seq 120); do [ -f "$tmp/bucket/quick/MANIFEST.txt" ] && break; sleep 0.5; done
+  # Si aspetta la riga di log, non il MANIFEST: il log arriva dopo l'upload
+  # del MANIFEST, e controllarlo subito dopo era una race.
+  for i in $(seq 120); do
+    grep -qs "backup completato" "$tmp/home/.config/confsync/quick-push.log" && break; sleep 0.5
+  done
   [ -f "$tmp/bucket/quick/MANIFEST.txt" ]
   grep -q "backup completato" "$tmp/home/.config/confsync/quick-push.log"
 }

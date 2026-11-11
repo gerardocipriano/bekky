@@ -74,6 +74,7 @@ DOTFILES_ONLY_EXCLUDES=(
   '.config/gcloud/legacy_credentials' '.config/gcloud/logs'
   '.config/gh/hosts.yml'
   '.claude/.credentials.json'
+  '.local/share/opencode/auth.json' '.local/share/opencode/account.json'
 )
 # Binari precompilati in .local/bin e bin: pesano ~175M e sono linkati contro
 # la glibc di questa macchina, quindi non sopravvivono a una distro con glibc
@@ -89,6 +90,8 @@ SECRET_PATHS=(
   .kube/config .kube/kubectx .docker/config.json .azure .boto .vault-token .env
   .config/gh/hosts.yml .git-credentials .pgpass .npmrc .pypirc
   .local/share/keyrings .local/share/kwalletd .claude/.credentials.json
+  # login dei provider di opencode (il resto di .local/share/opencode e' nei dotfiles)
+  .local/share/opencode/auth.json .local/share/opencode/account.json
 )
 # Pattern che marcano un file come sensibile (usati anche nelle repo)
 SECRET_PATTERNS=( '.env' '.env.*' '*.key' '*.pem' '*secret*' '*token*' '*credential*'
@@ -122,6 +125,8 @@ QUICK_INCLUDE=(
   .oh-my-zsh/custom .agents .opencode .config/opencode
   .config/gcloud .config/gh .config/glab-cli .config/git .config/1Password/ssh
   .terraformrc .tokenjuice
+  # modello scelto in opencode (il db e' troppo grande, non entra)
+  .local/state/opencode/model.json
   # solo script: i binari li taglia il tetto CONFSYNC_QUICK_MAX_FILE_MB
   .local/bin scripts
 )
@@ -139,6 +144,14 @@ QUICK_EXCLUDES=(
 QUICK_KEEP=( '.claude/projects/*/memory' )
 # Archivi separati dal core ("nome:prefisso" relativo a HOME): cambiano di rado,
 # cosi' non si ricaricano a ogni sessione. Una lista file e un .tar.enc ciascuno.
-QUICK_SPLIT=( 'plugins:.claude/plugins' )
+QUICK_SPLIT=( 'plugins:.claude/plugins' 'code:code' )
+# File e dir di progetto sotto REPO_SCAN_DIRS (sia fuori che dentro le repo):
+# istruzioni e stato di Claude non finiscono mai in git, ma servono su un PC nuovo.
+# Le dir si salvano per intero, tranne .claude/worktrees e il junk (vedi quick_list_code).
+QUICK_CODE_FILES=( CLAUDE.md CLAUDE.local.md AGENTS.md )
+QUICK_CODE_DIRS=( handoff .claude )
+# Estensioni (senza maiuscole/minuscole) saltate nel set quick sotto ~/code: media
+# pesanti e rigenerabili. Restano nel backup completo.
+QUICK_CODE_SKIP_EXT=( png jpg jpeg gif webp svg pdf mp4 )
 # Tool installati da scripts/quick-tools.sh (una funzione tool_<nome> ciascuno)
 QUICK_TOOLS=( node rtk uv opencode gcloud terraform kubectl gh glab jq op )
