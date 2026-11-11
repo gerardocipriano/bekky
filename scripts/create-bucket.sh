@@ -14,7 +14,9 @@ LOCATION="${CONFSYNC_LOCATION:-europe-west1}"
 CLASS="${CONFSYNC_STORAGE_CLASS:-NEARLINE}"
 
 echo ">> Account: $ACCOUNT  Project: $PROJECT"
-[ -n "$ACCOUNT" ] && gcloud config set account "$ACCOUNT" >/dev/null
+# Account solo per questo processo: "gcloud config set account" cambiava
+# l'account attivo della macchina, anche per gli altri progetti.
+[ -n "$ACCOUNT" ] && export CLOUDSDK_CORE_ACCOUNT="$ACCOUNT"
 
 if gsutil ls -b -p "$PROJECT" "$BUCKET" >/dev/null 2>&1; then
   echo ">> Bucket già esistente: $BUCKET"

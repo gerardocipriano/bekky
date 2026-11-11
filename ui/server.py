@@ -2,7 +2,7 @@
 """Console web locale di bekky: server su 127.0.0.1, solo libreria standard.
 
 Uso: confsync ui [--port N] [--no-open]
-Con BEKKY_UI_MOCK=ok|reauth|stale|fresh risponde con dati finti e job finti,
+Con BEKKY_UI_MOCK=ok|reauth|stale|fresh|setup risponde con dati finti e job finti,
 senza toccare gcloud, bucket, cron, settings di Claude o backup.
 """
 import argparse
@@ -11,6 +11,7 @@ import errno
 import hmac
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -29,17 +30,217 @@ JOBS_DIR = os.path.join(CONF, "ui-jobs")
 QUICK_LOGS = os.path.join(CONF, "quick-logs")
 
 MOCK = os.environ.get("BEKKY_UI_MOCK", "")
-SCENARIOS = ("ok", "reauth", "stale", "fresh")
+SCENARIOS = ("ok", "reauth", "stale", "fresh", "setup")
 if MOCK and MOCK not in SCENARIOS:
     sys.exit("BEKKY_UI_MOCK deve essere uno di: " + ", ".join(SCENARIOS))
 
-BUCKET = os.environ.get("CONFSYNC_BUCKET", "")
+# --- Configurazione --------------------------------------------------------
+# Il server modifica solo le tre righe CONFSYNC_BUCKET/PROJECT/ACCOUNT del file
+# di config; il resto (HOST_TAG, OP_REF, commenti) resta com'e'.
+
+CONFIG_PATH = os.environ.get("CONFSYNC_CONFIG") or os.path.join(CONF, "config")
+CONFIG_VARS = {"bucket": "CONFSYNC_BUCKET", "project": "CONFSYNC_PROJECT",
+               "account": "CONFSYNC_ACCOUNT"}
+DEFAULTS = {"bucket": "gs://il-tuo-bucket", "project": "il-tuo-progetto",
+            "account": "tu@esempio.it"}
+OP_REF_DEFAULT = "op://Personal/bekky passphrase/password"
+BUCKET_RE = re.compile(r"gs://[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]")
+PROJECT_RE = re.compile(r"[a-z][a-z0-9-]{3,28}[a-z0-9]")
+BUCKET_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{1,61}[a-z0-9]")
+ACCOUNT_RE = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}")
+CONF_LINE_RE = re.compile(
+    r"""^(\s*(?:export\s+)?)(CONFSYNC_[A-Z_]+)=("[^"]*"|'[^']*'|[^\s#]*)(\s*#.*)?\s*$""")
+
 HOST_TAG = os.environ.get("CONFSYNC_HOST_TAG") or os.uname().nodename
-ACCOUNT = os.environ.get("CONFSYNC_ACCOUNT", "")
+
+
+def _unquote(v):
+    return v[1:-1] if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'" else v
+
+
+def read_config_file(path=None):
+    """Valori CONFSYNC_* letti dal file senza eseguirlo; {} se manca."""
+    out = {}
+    try:
+        with open(path or CONFIG_PATH, encoding="utf-8") as f:
+            for line in f:
+                m = CONF_LINE_RE.match(line.rstrip("\n"))
+                if m:
+                    out[m.group(2)] = _unquote(m.group(3))
+    except OSError:
+        pass
+    return out
+
+
+def _initial_config():
+    if MOCK:
+        if MOCK == "setup":
+            return {"bucket": "", "project": "", "account": "", "opRef": ""}
+        return {"bucket": "gs://bekky-esempio", "project": "progetto-esempio",
+                "account": "tu@esempio.it", "opRef": "op://Personal/bekky passphrase/password"}
+    f = read_config_file()
+    g = lambda k: f.get(k, os.environ.get(k, ""))
+    return {"bucket": g("CONFSYNC_BUCKET"), "project": g("CONFSYNC_PROJECT"),
+            "account": g("CONFSYNC_ACCOUNT"), "opRef": g("CONFSYNC_OP_REF")}
+
+
+CONFIG = _initial_config()
+BUCKET = CONFIG["bucket"]
+ACCOUNT = CONFIG["account"]
 if MOCK:
-    BUCKET = BUCKET or "gs://bekky-esempio"
     HOST_TAG = "pc-di-prova"
-    ACCOUNT = "tu@esempio.it"
+
+
+def validate_config(vals, fields=("bucket", "project", "account")):
+    """Errori per campo (dict vuoto = valido). Le regex escludono virgolette, $, backtick e a capo."""
+    err = {}
+    v = {k: vals.get(k, "") for k in fields}
+    if any(not isinstance(x, str) for x in v.values()):
+        return {"_": "Valori non validi."}
+    if "bucket" in fields and not BUCKET_RE.fullmatch(v["bucket"]):
+        err["bucket"] = "Scrivi il nome come gs://nome-dello-spazio (minuscole, numeri, punti e trattini)."
+    if "project" in fields and v["project"] and not PROJECT_RE.fullmatch(v["project"]):
+        err["project"] = "Il progetto usa minuscole, numeri e trattini (da 5 a 30 caratteri)."
+    if "account" in fields and v["account"] and not ACCOUNT_RE.fullmatch(v["account"]):
+        err["account"] = "Scrivi un indirizzo email valido, per esempio nome@azienda.it."
+    return err
+
+
+def write_config(vals):
+    """Riscrive solo le tre righe note: atomico, file 600, copia in config.bak."""
+    target = os.path.realpath(CONFIG_PATH)
+    try:
+        with open(target, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        existed = True
+    except FileNotFoundError:
+        lines, existed = [], False
+    names = {CONFIG_VARS[k]: vals[k] for k in CONFIG_VARS}
+    out, seen = [], set()
+    for line in lines:
+        m = CONF_LINE_RE.match(line)
+        if m and m.group(2) in names:
+            if m.group(2) in seen:
+                continue
+            seen.add(m.group(2))
+            out.append('%s%s="%s"%s' % (m.group(1) or "export ", m.group(2), names[m.group(2)], m.group(4) or ""))
+        else:
+            out.append(line)
+    for name, val in names.items():
+        if name not in seen:
+            out.append('export %s="%s"' % (name, val))
+    os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+    if existed:
+        bak = os.open(target + ".bak", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(bak, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    tmp = target + ".ui-tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+    os.replace(tmp, target)
+
+
+def apply_config(vals):
+    """Aggiorna il server in memoria (e l'ambiente dei processi figli)."""
+    global BUCKET, ACCOUNT
+    CONFIG.update({k: vals[k] for k in CONFIG_VARS})
+    BUCKET, ACCOUNT = CONFIG["bucket"], CONFIG["account"]
+    for k, name in CONFIG_VARS.items():
+        os.environ[name] = CONFIG[k]
+    CHECKS_CACHE.val = BACKUPS_CACHE.val = None
+
+
+def tilde(path):
+    return "~" + path[len(HOME):] if path.startswith(HOME + os.sep) else path
+
+
+def list_buckets():
+    """Nomi (senza gs://) degli spazi del progetto configurato."""
+    if MOCK:
+        with MOCK_STATE.lock:
+            return list(MOCK_STATE.buckets)
+    if not CONFIG["project"]:
+        raise RuntimeError("Manca il progetto Google Cloud: indicalo in Avanzate.")
+    r = subprocess.run([os.environ.get("CONFSYNC_GSUTIL", "gsutil"), "ls", "-p", CONFIG["project"]],
+                       capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+                       env=_gcloud_env())
+    if r.returncode != 0:
+        raise RuntimeError(_gsutil_reason(r.stderr))
+    names = sorted(l.strip()[5:].rstrip("/") for l in r.stdout.splitlines() if l.startswith("gs://"))
+    # Bucket di servizio creati da Google (App Engine, Cloud Deploy): non sono
+    # una scelta sensata per i salvataggi e confondono l'elenco. Quello in uso resta sempre.
+    current = CONFIG["bucket"][5:] if CONFIG.get("bucket", "").startswith("gs://") else ""
+    hidden = ("appspot.com", "_clouddeploy", "deploy-artifacts", "_cloudbuild", "gcf-")
+    return [n for n in names if n == current or not any(h in n for h in hidden)]
+
+
+def create_bucket(name):
+    """Crea lo spazio con scripts/create-bucket.sh. Torna (ok, errore)."""
+    if MOCK:
+        time.sleep(1.5)
+        with MOCK_STATE.lock:
+            if name == "nome-gia-usato" or name in MOCK_STATE.buckets:
+                return False, "Questo nome è già usato da un altro spazio. Scegline un altro."
+            MOCK_STATE.buckets.append(name)
+        return True, ""
+    if not CONFIG["project"]:
+        return False, "Manca il progetto Google Cloud: indicalo in Avanzate."
+    # CONFSYNC_CONFIG=/dev/null: lo script rilegge il file di config e
+    # sovrascriverebbe bucket e progetto passati qui; il file lo tocca solo il salvataggio.
+    env = _gcloud_env()
+    env.update(CONFSYNC_CONFIG="/dev/null", CONFSYNC_BUCKET="gs://" + name,
+               CONFSYNC_PROJECT=CONFIG["project"], CONFSYNC_ACCOUNT=CONFIG.get("account") or "")
+    try:
+        r = subprocess.run(["bash", os.path.join(BEKKY_DIR, "scripts", "create-bucket.sh")],
+                           capture_output=True, text=True, timeout=180, stdin=subprocess.DEVNULL, env=env)
+    except subprocess.TimeoutExpired:
+        return False, "La creazione impiega troppo: riprova tra poco."
+    if r.returncode != 0:
+        t = r.stderr or ""
+        if "already exists" in t or "409" in t:
+            return False, "Questo nome è già usato da un altro spazio. Scegline un altro."
+        return False, _gsutil_reason(t)
+    return True, ""
+
+
+def get_config():
+    return dict(CONFIG, opRefDefault=OP_REF_DEFAULT, defaults=DEFAULTS,
+                configPath="~/.config/confsync/config" if MOCK else tilde(CONFIG_PATH),
+                passphrasePath="~/.config/confsync/passphrase")
+
+
+def _gsutil_reason(stderr):
+    t = stderr or ""
+    if "BucketNotFound" in t or "404" in t:
+        return "Questo spazio di archiviazione non esiste."
+    if "AccessDenied" in t or "403" in t:
+        return "L'account non ha il permesso di usare questo spazio."
+    if "Reauthentication" in t or "credentials" in t.lower() or "login" in t.lower():
+        return "L'accesso a Google Cloud è scaduto: rifallo dal terminale."
+    return _short_error(t)
+
+
+def verify_config(bucket, account):
+    if MOCK:
+        if "nonesiste" in bucket:
+            return {"ok": False, "error": "Questo spazio di archiviazione non esiste."}
+        if "negato" in bucket:
+            return {"ok": False, "error": "L'account non ha il permesso di usare questo spazio."}
+        time.sleep(0.6)
+        return {"ok": True, "error": ""}
+    env = dict(os.environ)
+    if account:
+        env["CLOUDSDK_CORE_ACCOUNT"] = account
+    try:
+        r = subprocess.run([os.environ.get("CONFSYNC_GSUTIL", "gsutil"), "ls", "-b", bucket],
+                           capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL, env=env)
+    except FileNotFoundError:
+        return {"ok": False, "error": "gsutil non è installato su questo PC."}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Nessuna risposta entro 20 secondi: controlla la rete."}
+    return {"ok": True, "error": ""} if r.returncode == 0 else {"ok": False, "error": _gsutil_reason(r.stderr)}
+
 
 ACTIONS = ("quick-push", "full-backup", "hook-install", "hook-uninstall",
            "tools-retry", "repos-retry")
@@ -47,6 +248,7 @@ STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/theme.js": ("theme.js", "text/javascript; charset=utf-8"),
 }
 MOCK_JOB_SECONDS = 8
 
@@ -247,8 +449,9 @@ class Jobs:
 
     # -- mock
     def _mock_run(self, name):
-        steps = ["avvio %s (finto)" % name, "raccolgo i file", "cifro gli archivi",
-                 "confronto con il bucket", "carico sul bucket", "fine"]
+        steps = ["avvio %s (finto)" % name, "raccolgo dotfiles", "raccolgo secrets",
+                 "manifest + checksum", "upload -> %s/%s/" % (BUCKET, HOST_TAG),
+                 "backup completato"]
         lines = self.mock_logs[name] = []
         for i, text in enumerate(steps):
             lines.append(">> %s" % text)
@@ -329,6 +532,8 @@ class MockState:
         self.history = self._history(scenario)
         self.lock = threading.Lock()
         self.hook = scenario in ("ok", "fresh")
+        self.passphrase = scenario != "setup"
+        self.buckets = ["archivio-famiglia", "backup-vecchio-2024", "bekky-esempio"]
 
     def _history(self, sc):
         now, h = self.t0, []
@@ -337,7 +542,7 @@ class MockState:
             h.append({"ts": iso(now - ago), "kind": kind, "result": result, "bytes": size})
 
         D, H, M = dt.timedelta(days=1), dt.timedelta(hours=1), dt.timedelta(minutes=1)
-        if sc == "fresh":
+        if sc in ("fresh", "setup"):
             return h
         quick_days = {"ok": [0, 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 19, 20, 21, 22, 23, 25, 26, 28],
                       "reauth": [1, 2, 3, 4, 5, 7, 8, 9, 12, 13, 14, 15, 18, 19, 20, 22, 23, 24, 27, 28],
@@ -391,7 +596,7 @@ class MockState:
         ]}
 
     def cron(self):
-        if self.scenario == "fresh":
+        if self.scenario in ("fresh", "setup"):
             return {"present": False, "line": "", "next": None}
         line = "0 13 * * 3 /home/utente/code/misc/bekky/scripts/bekky-cron.sh"
         return {"present": True, "line": line, "next": cron_next(line, now_utc())}
@@ -401,12 +606,13 @@ class MockState:
             return {"gcloud": {"ok": False, "account": ACCOUNT,
                                "error": "Reauthentication failed. cannot prompt during non-interactive execution."},
                     "bucket": {"ok": False}}
-        return {"gcloud": {"ok": True, "account": ACCOUNT, "error": ""}, "bucket": {"ok": True}}
+        return {"gcloud": {"ok": True, "account": ACCOUNT, "error": ""},
+                "bucket": {"ok": bool(BUCKET)}}
 
     def backups(self):
         base = self.t0
         offs = {"ok": [3, 10, 17, 24], "reauth": [4, 11, 18, 25],
-                "stale": [12, 19, 26], "fresh": [14]}[self.scenario]
+                "stale": [12, 19, 26], "fresh": [14], "setup": []}[self.scenario]
         out = [{"ts": (base - dt.timedelta(days=d, hours=1)).strftime("%Y%m%dT%H%M%SZ"),
                 "bytes": 182_000_000 + d * 91_000} for d in offs]
         with self.lock:
@@ -435,7 +641,7 @@ def get_status():
     if MOCK:
         with MOCK_STATE.lock:
             hist = list(MOCK_STATE.history)
-        checks = {"passphrase": True, "hook": MOCK_STATE.hook, "cron": MOCK_STATE.cron()}
+        checks = {"passphrase": MOCK_STATE.passphrase, "hook": MOCK_STATE.hook, "cron": MOCK_STATE.cron()}
         restore = MOCK_STATE.restore()
     else:
         hist = read_history()
@@ -446,6 +652,7 @@ def get_status():
     out = {
         "host": HOST_TAG, "bucket": BUCKET, "mock": MOCK or None, "now": iso(now_utc()),
         "checks": checks,
+        "configured": {"bucket": bool(BUCKET), "passphrase": bool(checks["passphrase"])},
         "quick": {"last": quick, "running": JOBS.running("quick-push") or (not MOCK and _quick_locked())},
         "full": {"last": full, "running": JOBS.running("full-backup")},
         "jobs": jobs,
@@ -494,7 +701,7 @@ class Cache:
             return self.val
 
 
-CHECKS_CACHE, BACKUPS_CACHE = Cache(60), Cache(300)
+CHECKS_CACHE, BACKUPS_CACHE, BUCKETS_CACHE = Cache(60), Cache(300), Cache(20)
 
 
 def _gcloud_env():
@@ -705,7 +912,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if u.path == "/api/status":
                 return self._send(200, get_status())
+            if u.path == "/api/config":
+                return self._send(200, get_config())
+            if u.path == "/api/buckets":
+                return self._send(200, {"buckets": BUCKETS_CACHE.get(list_buckets)})
             if u.path == "/api/checks":
+                if q.get("fresh"):
+                    CHECKS_CACHE.val = None
                 return self._send(200, CHECKS_CACHE.get(compute_checks))
             if u.path == "/api/backups":
                 return self._send(200, {"backups": BACKUPS_CACHE.get(compute_backups)})
@@ -728,7 +941,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(404, "non trovato")
         if not self._guard(True):
             return
-        if u.path != "/api/action":
+        if u.path not in ("/api/action", "/api/config", "/api/config/verify", "/api/buckets"):
             return self._err(404, "non trovato")
         try:
             n = int(self.headers.get("Content-Length", "0"))
@@ -738,9 +951,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(400, "corpo non valido")
         try:
             body = json.loads(self.rfile.read(n).decode("utf-8"))
-            name = body["name"]
-        except (ValueError, KeyError, TypeError):
-            return self._err(400, "serve JSON con name")
+            if not isinstance(body, dict):
+                raise TypeError
+        except (ValueError, TypeError):
+            return self._err(400, "serve un oggetto JSON")
+        if u.path == "/api/config":
+            return self._post_config(body)
+        if u.path == "/api/config/verify":
+            return self._post_verify(body)
+        if u.path == "/api/buckets":
+            return self._post_bucket(body)
+        name = body.get("name")
         if name not in ACTIONS:
             return self._err(400, "azione sconosciuta")
         if not MOCK:
@@ -752,6 +973,40 @@ class Handler(BaseHTTPRequestHandler):
         if not JOBS.start(name):
             return self._err(409, "azione gia' in corso")
         self._send(202, {"started": name})
+
+    def _post_config(self, body):
+        vals = {k: body.get(k, "") for k in CONFIG_VARS}
+        errs = validate_config(vals)
+        if errs:
+            return self._send(400, {"error": "Valori non validi", "fields": errs})
+        if not MOCK:
+            try:
+                write_config(vals)
+            except OSError as e:
+                return self._err(500, "non riesco a salvare: %s" % e.strerror)
+        apply_config(vals)
+        self._send(200, get_config())
+
+    def _post_bucket(self, body):
+        name = body.get("name")
+        if not isinstance(name, str) or not BUCKET_NAME_RE.fullmatch(name) or name.startswith("goog"):
+            return self._send(400, {"error": "Nome non valido", "fields": {
+                "name": "Usa minuscole, numeri e trattini (da 3 a 63 caratteri), senza spazi."}})
+        ok, msg = create_bucket(name)
+        BUCKETS_CACHE.val = None
+        if not ok:
+            return self._err(409, msg)
+        self._send(201, {"name": name, "bucket": "gs://" + name})
+
+    def _post_verify(self, body):
+        vals = {k: body.get(k, "") for k in ("bucket", "account")}
+        errs = validate_config(vals, ("bucket", "account"))
+        if errs:
+            return self._send(400, {"error": "Valori non validi", "fields": errs})
+        try:
+            self._send(200, verify_config(vals["bucket"], vals["account"]))
+        except OSError as e:
+            self._send(200, {"ok": False, "error": str(e)})
 
     def do_PUT(self):
         self._err(405, "metodo non ammesso")

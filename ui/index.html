@@ -2,117 +2,56 @@
 <html lang="it">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>bekky</title>
 <link rel="stylesheet" href="/style.css">
+<script src="/theme.js"></script>
 </head>
 <body>
-<header class="top">
-  <p class="wordmark">bekky</p>
-  <p class="where mono" id="where" aria-label="Host e bucket"></p>
-</header>
+<a class="skip" href="#main">Vai al contenuto</a>
 
-<main id="main">
-  <h1 class="sr-only">Console bekky</h1>
-
-  <div class="errbar" id="errbar" role="alert" hidden>
-    <span id="errtext"></span>
-    <button type="button" id="errretry">Riprova</button>
+<div class="app">
+  <div class="sidebar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 5 6v5.5c0 4.2 2.8 7.4 7 9 4.2-1.6 7-4.8 7-9V6z"/><path d="m8.8 12 2.4 2.4 4-4.6"/></svg>
+      </span>
+      <span class="wordmark">bekky</span>
+      <span class="pc-mobile" id="pc-mobile"></span>
+    </div>
+    <nav class="nav" id="nav" aria-label="Sezioni"></nav>
+    <div class="pc">
+      <span class="pc-label">Questo PC</span>
+      <span class="pc-name" id="pc-name"></span>
+    </div>
   </div>
 
-  <section aria-labelledby="h-stato" class="sec">
-    <h2 id="h-stato" class="sr-only">Stato</h2>
-    <div class="status" id="status" data-level="wait" aria-live="polite">
-      <span class="status-tag mono" id="status-tag">Attendi</span>
-      <p class="status-text" id="status-text">Leggo lo stato.</p>
-      <div class="status-actions" id="status-actions"></div>
-    </div>
-  </section>
-
-  <section aria-labelledby="h-30" class="sec">
-    <h2 id="h-30">Ultimi 30 giorni</h2>
-    <div class="strip" id="strip"></div>
-    <div class="strip-scale mono" aria-hidden="true"><span>30 giorni fa</span><span>oggi</span></div>
-    <p class="legend" id="legend"></p>
-    <div class="sr-only"><table id="strip-table">
-      <caption>Backup per giorno negli ultimi 30 giorni</caption>
-      <thead><tr><th scope="col">Giorno</th><th scope="col">Backup completo</th><th scope="col">Push core</th></tr></thead>
-      <tbody></tbody>
-    </table></div>
-  </section>
-
-  <section aria-labelledby="h-azioni" class="sec">
-    <h2 id="h-azioni">Azioni</h2>
-    <div id="actions"></div>
-  </section>
-
-  <section aria-labelledby="h-auto" class="sec">
-    <h2 id="h-auto">Automatismi</h2>
-    <dl class="kv" id="auto"></dl>
-  </section>
-
-  <section aria-labelledby="h-core" class="sec">
-    <h2 id="h-core">Cosa c'è nel core</h2>
-    <div class="core-head">
-      <button type="button" id="core-go">Calcola</button>
-      <p class="muted" id="core-sum">Conta i file che il push mette nel core. Ci vogliono alcuni secondi.</p>
-    </div>
-    <div id="core-body" hidden>
-      <label class="filter" for="core-filter"><span>Filtra per path</span>
-        <input type="search" id="core-filter" autocomplete="off" spellcheck="false" placeholder=".claude">
-      </label>
-      <ul class="bars" id="core-list"></ul>
-      <button type="button" id="core-more" hidden></button>
-    </div>
-  </section>
-
-  <section aria-labelledby="h-new" class="sec" id="pc-nuovo">
-    <h2 id="h-new">PC nuovo</h2>
-    <p>Sul PC nuovo incolla questa riga nel terminale.</p>
-    <div class="cmd">
-      <pre class="mono" id="oneliner">curl -fsSL https://raw.githubusercontent.com/gerardocipriano/bekky/main/scripts/quick.sh | bash</pre>
-      <button type="button" data-copy="#oneliner">Copia</button>
-    </div>
-    <p>Ti chiederà solo due cose.</p>
-    <ol class="plain">
-      <li>La passphrase del backup.</li>
-      <li>Il login gcloud.</li>
-    </ol>
-    <p class="muted">Il restore non si fa da qui: sovrascrive la HOME.</p>
-    <div id="restore" hidden></div>
-  </section>
-
-  <details class="sec" id="d-backups">
-    <summary>Backup completi nel bucket</summary>
-    <div class="det-body">
-      <div class="det-bar"><button type="button" id="backups-go">Aggiorna</button><span class="muted" id="backups-note"></span></div>
-      <table class="tbl" id="backups-table" hidden>
-        <thead><tr><th scope="col">Data</th><th scope="col" class="num">Peso</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </details>
-
-  <details class="sec" id="d-log">
-    <summary>Log</summary>
-    <div class="det-body">
-      <div class="det-bar">
-        <label for="log-name" class="sr-only">Quale log</label>
-        <select id="log-name">
-          <option value="job">Ultimo job lanciato da qui</option>
-          <option value="quick">Push core (hook)</option>
-          <option value="full">Backup completo (cron)</option>
-          <option value="tools">Tool dopo il restore</option>
-          <option value="repos">Repo dopo il restore</option>
-        </select>
-        <button type="button" id="log-go">Aggiorna</button>
+  <main id="main" class="main" tabindex="-1">
+    <div class="content">
+      <header class="page-head">
+        <h1 id="view-title" tabindex="-1">bekky</h1>
+        <p class="lead" id="view-sub"></p>
+      </header>
+      <div class="banner" id="errbar" role="alert" hidden>
+        <svg class="ic" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4 3 19.5h18z"/><path d="M12 10v4.5"/><path d="M12 17.2v.1"/></svg>
+        <span id="errtext"></span>
+        <button type="button" class="btn sm" id="errretry">Riprova</button>
       </div>
-      <pre class="mono logview" id="logview" role="log" aria-live="polite" tabindex="0" aria-label="Contenuto del log"></pre>
+      <div id="view"></div>
     </div>
-  </details>
-</main>
+  </main>
+</div>
 
+<dialog id="dlg" class="dlg" aria-labelledby="dlg-title" aria-modal="true">
+  <h2 id="dlg-title"></h2>
+  <div id="dlg-body" class="dlg-body"></div>
+  <div class="dlg-actions" id="dlg-actions"></div>
+</dialog>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+<noscript><p class="noscript">Per usare bekky serve JavaScript attivo nel browser.</p></noscript>
 <script src="/app.js"></script>
 </body>
 </html>
