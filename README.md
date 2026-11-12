@@ -103,6 +103,7 @@ bekky restore --dry-run      # anteprima, non tocca nulla
 bekky restore --no-dotfiles --repos   # secondo passaggio: non annulla rehome e modifiche
 bekky backup --quick         # solo il set quick (config Claude, secrets): secondi
 bekky restore --quick        # ripristina il set quick
+bekky agent-config [--push] [--dry-run]   # config agenti generale -> git (repo awesome-agent-config)
 bekky ui                     # console web locale
 CONFSYNC_RESTORE_TS=<ts> bekky restore   # un backup diverso dall'ultimo
 ```
@@ -228,7 +229,25 @@ manda una **notifica desktop** (`notify-send`) se fallisce. Esempio settimanale:
 0 13 * * 3 /home/USER/code/misc/bekky/scripts/bekky-cron.sh
 ```
 
-Log dell'ultima esecuzione: `~/.config/confsync/last-run.log`.
+Prima del backup la run settimanale lancia `bekky agent-config --push`, a
+best effort: se fallisce il backup cifrato parte lo stesso. Se il gate segreti
+di awesome-agent-config esce con 1 arriva una notifica ("agent-config NON
+pubblicata"). Il quick di fine sessione non lo lancia: un commit a sessione è
+rumore.
+
+Log dell'ultima esecuzione (agent-config e backup): `~/.config/confsync/last-run.log`.
+
+### Config degli agenti: git e bucket
+
+- Parte generale e condivisibile: git, tramite `bekky agent-config`. Il comando
+  cerca il repo in `CONFSYNC_AGENT_CONFIG_REPO`, poi in `~/.agent-config`, poi in
+  `~/code/misc/awesome-agent-config`; se non lo trova avvisa ed esce 0.
+- Overlay privato (`~/.config/agent-config/`: regole cliente, env, denylist) e
+  tutto il resto: bucket cifrato, sia nel backup completo sia nel quick.
+- Da `~/.claude` il backup (completo e quick) salta lo stato di runtime
+  (`CLAUDE_RUNTIME_EXCLUDES` in `lib/manifest.sh`: sessioni, cache, plugin
+  scaricati). Restano config, `history.jsonl` e `projects/*/memory`. Dopo un
+  restore i plugin vanno riscaricati da Claude Code.
 
 ---
 
@@ -262,6 +281,7 @@ Tutto in `~/.config/confsync/config` (vedi [`config.example`](config.example)):
 | `CONFSYNC_QUICK_PREFIX` | `quick` | prefisso del set quick nel bucket |
 | `CONFSYNC_QUICK_MAX_FILE_MB` | `5` | tetto per file nel set quick |
 | `CONFSYNC_QUICK_CODE_MAX_FILE_KB` | `1024` | tetto per file dei progetti sotto `~/code` (archivio `code`); le estensioni media in `QUICK_CODE_SKIP_EXT` restano fuori dal quick |
+| `CONFSYNC_AGENT_CONFIG_REPO` | `~/.agent-config`, poi `~/code/misc/awesome-agent-config` | repo usato da `bekky agent-config` |
 | `CONFSYNC_OP_REF` | `op://Personal/bekky passphrase/password` | riferimento 1Password della passphrase |
 
 Per cambiare bucket: console → Impostazioni → **Cambia spazio**, oppure modifica

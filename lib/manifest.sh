@@ -42,9 +42,6 @@ EXCLUDE_PATTERNS=(
   '*/Service Worker/CacheStorage/*' '*/Service Worker/ScriptCache/*'
   '*/blob_storage/*' '*/Crashpad/*' '*/component_crx_cache/*' '*/GrShaderCache/*'
   '*.log' '*/logs/*' '*/.git/*' '*/node_modules/*' '*.sock' '*.lock'
-  # Stato runtime di Claude Code: marker e offset ricreati a ogni sessione.
-  '.claude/.telegram-pending/*' '.claude/.telegram-offset'
-  '.claude/jobs' '.claude/paste-cache' '.claude/shell-snapshots' '.claude/session-env'
   # Codice o dati rigenerabili dentro le dir dei tool
   '.hermes/hermes-agent' '.hermes/venv' '.hermes/cache' '.hermes/audio_cache'
   '.hermes/image_cache' '.hermes/*.lock' '.hermes/*.pid'
@@ -54,6 +51,35 @@ EXCLUDE_PATTERNS=(
   # Stato di confsync: config e passphrase sono della macchina (host tag),
   # il resto (inventario, bundle, log del restore) e' rigenerato
   '.config/confsync'
+)
+# Stato runtime di Claude Code, ricreato a ogni sessione o rigenerabile: una
+# sola lista per backup completo e quick. history.jsonl, settings e il resto
+# della config restano fuori da qui di proposito. Path relativi a HOME.
+CLAUDE_RUNTIME_EXCLUDES=(
+  .claude/projects .claude/file-history .claude/transcripts
+  .claude/shell-snapshots .claude/paste-cache .claude/session-env
+  .claude/jobs .claude/todos .claude/tasks .claude/debug .claude/statsig
+  .claude/telemetry .claude/backups .claude/daemon .claude/sessions
+  .claude/session-data .claude/metrics .claude/state
+  .claude/plugins/cache .claude/plugins/marketplaces
+  .claude/.telegram-pending .claude/.telegram-offset
+)
+# Nel backup completo i --exclude di tar matchano su qualunque suffisso del
+# path: '.claude/state' toglierebbe anche '<repo>/.claude/state'. Questi si
+# applicano con --anchored (vedi pack_encrypt in confsync), quindi valgono solo
+# dalla radice di HOME.
+# .claude/projects non si esclude per intero: la memoria sta in
+# projects/*/memory e tar non ha un "tranne". Si tolgono le sessioni (file
+# <uuid>.jsonl e dir <uuid>), cioe' tutto cio' che il quick scarta e che non e'
+# memoria. Il '*' non attraversa '/' (--no-wildcards-match-slash).
+TAR_ANCHORED_EXCLUDES=()
+for _e in "${CLAUDE_RUNTIME_EXCLUDES[@]}"; do
+  [ "$_e" = .claude/projects ] || TAR_ANCHORED_EXCLUDES+=("$_e")
+done
+unset _e
+TAR_ANCHORED_EXCLUDES+=(
+  '.claude/projects/*/*.jsonl'
+  '.claude/projects/*/????????-????-????-????-????????????'
 )
 # App pesanti: stato/cache voluminoso e non portabile (no customizzazioni utili).
 # Escluse per tenere il backup piccolo/economico (vedi requisito costo minimo).
@@ -123,6 +149,8 @@ QUICK_INCLUDE=(
   .claude .claude.json CLAUDE.md .CLAUDE.md
   .gitconfig .gitignore .zshrc .bashrc .profile .zprofile .aliases
   .oh-my-zsh/custom .agents .opencode .config/opencode
+  # overlay privato della config agenti (regole cliente, env, denylist): non va in git
+  .config/agent-config
   .config/gcloud .config/gh .config/glab-cli .config/git .config/1Password/ssh
   .terraformrc .tokenjuice
   # modello scelto in opencode (il db e' troppo grande, non entra)
@@ -133,9 +161,7 @@ QUICK_INCLUDE=(
 # Path (relativi a HOME) potati dalla lista file del core: peso inutile subito
 # dopo il restore. Non sono pattern tar: la lista si genera con find.
 QUICK_EXCLUDES=(
-  .claude/projects .claude/file-history .claude/transcripts
-  .claude/shell-snapshots .claude/paste-cache .claude/session-env
-  .claude/jobs .claude/todos .claude/debug .claude/statsig .claude/telemetry
+  "${CLAUDE_RUNTIME_EXCLUDES[@]}"
   .tokenjuice/artifacts .opencode/bin .opencode/node_modules
   .config/gcloud/logs .config/gcloud/virtenv .config/gcloud/cache
 )

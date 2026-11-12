@@ -85,7 +85,11 @@ make_quick_fixture() {
   echo '{"c":"gc"}'    > "$h/.config/gcloud/credentials.db"
   echo "oauth: gh"     > "$h/.config/gh/hosts.yml"
   echo "[core]"        > "$h/.config/gcloud/properties"
-  mkdir -p "$h/.claude/plugins/marketplaces/m1"; echo "plugin" > "$h/.claude/plugins/marketplaces/m1/p.txt"
+  mkdir -p "$h/.claude/plugins/data/m1"; echo "plugin" > "$h/.claude/plugins/data/m1/p.txt"
+  # junk rigenerabile di plugins: escluso da entrambi i backup
+  mkdir -p "$h/.claude/plugins/marketplaces/m1" "$h/.claude/plugins/cache/c1"
+  echo "clone" > "$h/.claude/plugins/marketplaces/m1/clone.txt"; echo "c" > "$h/.claude/plugins/cache/c1/c.txt"
+  echo '{"p":1}' > "$h/.claude/history.jsonl"
   mkdir -p "$h/.nvm/alias"; echo 22 > "$h/.nvm/alias/default"
 }
 

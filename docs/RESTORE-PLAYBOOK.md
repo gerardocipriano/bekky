@@ -23,6 +23,17 @@ domande all'utente. Chiedi solo se un passo richiede davvero lui (GUI di
 
 ## Fase 1: restore dei dati
 
+Ordine per la config degli agenti: la parte generale sta in git
+(awesome-agent-config), l'overlay privato in `~/.config/agent-config/` e viaggia
+nel backup cifrato. Prima il clone, poi il restore, poi il reinstall che unisce
+i due:
+
+```bash
+git clone https://github.com/gerardocipriano/awesome-agent-config.git ~/.agent-config && ~/.agent-config/install.sh --all
+# ...restore dei dati qui sotto (riporta ~/.config/agent-config/)...
+~/.agent-config/install.sh   # secondo giro: ora l'overlay privato viene unito
+```
+
 Il restore sovrascrive `~/.claude.json` e `~/.claude/.credentials.json` della
 sessione in corso. Salva il login fatto su questo PC e rimettilo subito dopo:
 

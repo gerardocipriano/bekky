@@ -6,3 +6,4 @@ export CONFSYNC_ACCOUNT="tua.email@example.com"      # account gcloud (opzionale
 # export CONFSYNC_HOST_TAG="$(hostname)"             # tag host nel bucket (default: hostname)
 # export CONFSYNC_ZSTD_LEVEL=10                       # livello compressione zstd
 # export CONFSYNC_CODE_EXCLUDE_DIRS="code/archivio code/vendor"  # dir di ~/code escluse dai file fuori repo
+# export CONFSYNC_AGENT_CONFIG_REPO="$HOME/code/misc/awesome-agent-config"  # repo di "confsync agent-config" (default: ~/.agent-config, poi ~/code/misc/awesome-agent-config)

@@ -28,7 +28,7 @@ unpack() {
   unpack "$q/$(obj_of "$q" plugins.tar.enc)" "$tmp/plug"
   unpack "$q/$(obj_of "$q" secrets.tar.enc)" "$tmp/sec"
   # plugins separati dal core
-  [ -f "$tmp/plug/.claude/plugins/marketplaces/m1/p.txt" ]
+  [ -f "$tmp/plug/.claude/plugins/data/m1/p.txt" ]
   [ ! -e "$tmp/core/.claude/plugins" ]
   [ -f "$tmp/core/.claude/settings.json" ]
   [ -f "$tmp/core/.claude.json" ]
@@ -68,7 +68,7 @@ unpack() {
   [ "$status" -eq 0 ]
   [ "$(cat "$new/CLAUDE.md")" = "# globale" ]
   [ "$(cat "$new/.claude/settings.json")" = '{"hooks":{}}' ]
-  [ "$(cat "$new/.claude/plugins/marketplaces/m1/p.txt")" = "plugin" ]
+  [ "$(cat "$new/.claude/plugins/data/m1/p.txt")" = "plugin" ]
   [ "$(cat "$new/.claude/projects/-home-x/memory/MEMORY.md")" = "ricordo" ]
   [ ! -e "$new/.claude/projects/-home-x/sess1.jsonl" ]
   # credenziali Claude sovrascritte, permessi stretti
@@ -185,7 +185,7 @@ unpack() {
   tmp="$(mktemp -d)"; make_quick_fixture "$tmp/home"
   run env HOME="$tmp/home" bash "$CONFSYNC" quick-list
   [ "$status" -eq 0 ]
-  [[ "$output" == *".claude/plugins/marketplaces/m1/p.txt"* ]]
+  [[ "$output" == *".claude/plugins/data/m1/p.txt"* ]]
   [[ "$output" == *"CLAUDE.md"* ]]
 }
 

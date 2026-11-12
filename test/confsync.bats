@@ -706,3 +706,130 @@ GSEOF
   [ "$status" -eq 0 ]
   [ "$(cat "$newhome/.zshrc")" = "alias x=locale" ]
 }
+
+# --- agent-config -------------------------------------------------------------
+
+# Repo finto con uno scripts/backup.sh che scrive su file gli argomenti ricevuti
+make_fake_aac() {
+  mkdir -p "$1/scripts"
+  cat > "$1/scripts/backup.sh" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$(dirname "$0")/args.txt"
+exit "${FAKE_AAC_RC:-0}"
+FAKE
+  chmod +x "$1/scripts/backup.sh"
+}
+
+@test "agent-config: trova il repo da CONFSYNC_AGENT_CONFIG_REPO e passa i flag" {
+  tmp="$(mktemp -d)"; make_fake_aac "$tmp/aac"; mkdir -p "$tmp/home"
+  run env HOME="$tmp/home" CONFSYNC_AGENT_CONFIG_REPO="$tmp/aac" bash "$CONFSYNC" agent-config --push --dry-run
+  [ "$status" -eq 0 ]
+  [ "$(cat "$tmp/aac/scripts/args.txt")" = "--push --dry-run" ]
+}
+
+@test "agent-config: l'exit code di backup.sh arriva al chiamante" {
+  tmp="$(mktemp -d)"; make_fake_aac "$tmp/aac"; mkdir -p "$tmp/home"
+  run env HOME="$tmp/home" FAKE_AAC_RC=1 CONFSYNC_AGENT_CONFIG_REPO="$tmp/aac" bash "$CONFSYNC" agent-config --push
+  [ "$status" -eq 1 ]
+}
+
+@test "agent-config: senza variabile usa il symlink ~/.agent-config" {
+  tmp="$(mktemp -d)"; make_fake_aac "$tmp/aac"; mkdir -p "$tmp/home"
+  ln -s "$tmp/aac" "$tmp/home/.agent-config"
+  run env -u CONFSYNC_AGENT_CONFIG_REPO HOME="$tmp/home" bash "$CONFSYNC" agent-config --dry-run
+  [ "$status" -eq 0 ]
+  [ "$(cat "$tmp/aac/scripts/args.txt")" = "--dry-run" ]
+}
+
+@test "agent-config: repo assente, esce 0 con un avviso" {
+  tmp="$(mktemp -d)"; mkdir -p "$tmp/home"
+  run env -u CONFSYNC_AGENT_CONFIG_REPO HOME="$tmp/home" bash "$CONFSYNC" agent-config --push
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"repo non trovato"* ]]
+  run env HOME="$tmp/home" CONFSYNC_AGENT_CONFIG_REPO="$tmp/non-esiste" bash "$CONFSYNC" agent-config --push
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"repo non trovato"* ]]
+}
+
+@test "agent-config: repo senza scripts/backup.sh, esce 0 con un avviso" {
+  tmp="$(mktemp -d)"; mkdir -p "$tmp/home" "$tmp/aac"
+  run env HOME="$tmp/home" CONFSYNC_AGENT_CONFIG_REPO="$tmp/aac" bash "$CONFSYNC" agent-config
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"backup.sh mancante"* ]]
+}
+
+@test "il comando sconosciuto elenca agent-config" {
+  run bash "$CONFSYNC" boh
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"agent-config"* ]]
+}
+
+# --- esclusioni runtime di ~/.claude -------------------------------------------
+
+@test "exclude runtime Claude: una sola lista, presente in quick e nel backup completo" {
+  run env CONFSYNC_PASSPHRASE=tp bash -c '
+    source "$0" --source-only
+    [ "${#CLAUDE_RUNTIME_EXCLUDES[@]}" -gt 10 ] || exit 10
+    for e in "${CLAUDE_RUNTIME_EXCLUDES[@]}"; do
+      printf "%s\n" "${QUICK_EXCLUDES[@]}" | grep -qxF -- "$e" || { echo "quick senza $e"; exit 11; }
+      [ "$e" = .claude/projects ] && continue
+      printf "%s\n" "${TAR_ANCHORED_EXCLUDES[@]}" | grep -qxF -- "$e" || { echo "full senza $e"; exit 12; }
+    done
+    # history.jsonl e la config vera non si escludono mai
+    printf "%s\n" "${CLAUDE_RUNTIME_EXCLUDES[@]}" "${TAR_ANCHORED_EXCLUDES[@]}" | grep -q "history.jsonl" && exit 13
+    # l overlay privato viaggia nel quick; .config intero e nel backup completo
+    printf "%s\n" "${QUICK_INCLUDE[@]}" | grep -qxF .config/agent-config || exit 14
+    printf "%s\n" "${INCLUDE_DOTFILES[@]}" | grep -qxF .config || exit 15
+    exit 0
+  ' "$CONFSYNC"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "backup completo: runtime di ~/.claude escluso, memory e history.jsonl restano, exclude ancorati" {
+  tmp="$(mktemp -d)"; h="$tmp/home"; make_quick_fixture "$h"
+  u=0f8c1a2e-1111-4222-8333-444455556666
+  mkdir -p "$h/.claude/projects/-home-x/$u" "$h/.claude/state" "$h/.claude/tasks" \
+           "$h/.claude/sessions" "$h/.claude/backups" "$h/.claude/.telegram-pending" \
+           "$h/Documents/proj/.claude/state" "$h/.config/agent-config/rules"
+  echo '{"t":2}' > "$h/.claude/projects/-home-x/$u.jsonl"
+  echo x > "$h/.claude/projects/-home-x/$u/tool.txt"
+  echo s > "$h/.claude/state/s"; echo t > "$h/.claude/tasks/t"; echo s > "$h/.claude/sessions/s"
+  echo b > "$h/.claude/backups/b"; echo p > "$h/.claude/.telegram-pending/p"; echo o > "$h/.claude/.telegram-offset"
+  echo "tieni" > "$h/Documents/proj/.claude/state/keep"
+  echo "regola privata" > "$h/.config/agent-config/rules/cliente.md"
+  export FAKE_BUCKET_DIR="$tmp/bucket"; mkdir -p "$FAKE_BUCKET_DIR"
+  mkdir -p "$tmp/bin"; make_fs_gsutil "$tmp/bin" "$FAKE_BUCKET_DIR"
+  env HOME="$h" CONFSYNC_PASSPHRASE=tp CONFSYNC_BUCKET=gs://testbucket \
+      PATH="$tmp/bin:$PATH" CONFSYNC_WORKDIR_KEEP="$tmp/work" bash "$CONFSYNC" backup
+  env CONFSYNC_PASSPHRASE=tp bash -c 'source "$0" --source-only; decrypt_unpack "$1" "$2"' \
+      "$CONFSYNC" "$tmp/work/dotfiles.tar.enc" "$tmp/ext"
+  c="$tmp/ext/.claude"
+  # config e dati da tenere
+  [ -f "$c/settings.json" ]
+  [ -f "$c/history.jsonl" ]
+  [ -f "$c/projects/-home-x/memory/MEMORY.md" ]
+  [ -f "$c/plugins/data/m1/p.txt" ]
+  [ -f "$tmp/ext/.config/agent-config/rules/cliente.md" ]
+  # sessioni e runtime fuori
+  [ ! -e "$c/projects/-home-x/$u.jsonl" ]
+  [ ! -e "$c/projects/-home-x/$u" ]
+  for d in file-history state tasks sessions backups .telegram-pending .telegram-offset \
+           plugins/marketplaces plugins/cache; do
+    [ ! -e "$c/$d" ]
+  done
+  # stesso nome altrove: l'exclude e' ancorato a ~/.claude
+  [ "$(cat "$tmp/ext/Documents/proj/.claude/state/keep")" = "tieni" ]
+}
+
+@test "backup --quick: l'overlay privato agent-config e nel core, il runtime no" {
+  tmp="$(mktemp -d)"; make_quick_fixture "$tmp/home"
+  mkdir -p "$tmp/home/.config/agent-config" "$tmp/home/.claude/state"
+  echo "x=1" > "$tmp/home/.config/agent-config/env"; echo s > "$tmp/home/.claude/state/s"
+  run env HOME="$tmp/home" bash "$CONFSYNC" quick-list
+  [ "$status" -eq 0 ]
+  [[ "$output" == *".config/agent-config/env"* ]]
+  [[ "$output" == *".claude/history.jsonl"* ]]
+  [[ "$output" != *".claude/state"* ]]
+  [[ "$output" != *".claude/plugins/marketplaces"* ]]
+  [[ "$output" != *".claude/plugins/cache"* ]]
+}

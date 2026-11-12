@@ -35,6 +35,8 @@ else
   # shellcheck disable=SC2034
   DOTFILES_ONLY_EXCLUDES=()
   # shellcheck disable=SC2034
+  TAR_ANCHORED_EXCLUDES=()
+  # shellcheck disable=SC2034
   IGNORED_JUNK_RE=''
   CONFSYNC_MAX_FILE_MB=20
   # shellcheck disable=SC2034
@@ -406,6 +408,12 @@ pack_encrypt() {
   if [ "${PACK_DOTFILES:-0}" = "1" ]; then
     for ex in "${DOTFILES_ONLY_EXCLUDES[@]}"; do tar_opts+=(--exclude="$ex"); done
   fi
+  # Le opzioni di matching di tar valgono per gli --exclude che le seguono:
+  # questi sono ancorati alla radice e senza '*' che attraversa '/', poi si
+  # torna ai default per non cambiare altro.
+  tar_opts+=(--anchored --no-wildcards-match-slash)
+  for ex in "${TAR_ANCHORED_EXCLUDES[@]}"; do tar_opts+=(--exclude="$ex"); done
+  tar_opts+=(--no-anchored --wildcards-match-slash)
   _tar_stream "${tar_opts[@]}" -C "$src" -cf - "${existing[@]}" \
     | eval "$(_comp_cmd)" \
     | openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -pass fd:3 -out "$out" 3<<<"$pass"
@@ -1367,6 +1375,28 @@ cmd_ui() {
     exec python3 "$SCRIPT_DIR/ui/server.py" "$@"
 }
 
+# Pubblica la config agenti generale (repo awesome-agent-config) lanciando il
+# suo scripts/backup.sh con gli stessi flag. Funzione opzionale: se repo o
+# script mancano esce 0, cosi' non rompe chi non la usa.
+cmd_agent_config() {
+  local repo="${CONFSYNC_AGENT_CONFIG_REPO:-}"
+  if [ -z "$repo" ] && [ -e "$HOME/.agent-config" ]; then
+    repo="$(readlink -f "$HOME/.agent-config")"
+  fi
+  if [ -z "$repo" ] && [ -d "$HOME/code/misc/awesome-agent-config" ]; then
+    repo="$HOME/code/misc/awesome-agent-config"
+  fi
+  if [ -z "$repo" ] || [ ! -d "$repo" ]; then
+    log "agent-config: repo non trovato (imposta CONFSYNC_AGENT_CONFIG_REPO), salto"
+    return 0
+  fi
+  if [ ! -x "$repo/scripts/backup.sh" ]; then
+    log "agent-config: $repo/scripts/backup.sh mancante o non eseguibile, salto"
+    return 0
+  fi
+  exec "$repo/scripts/backup.sh" "$@"
+}
+
 cmd_list() {
   require_deps; require_bucket
   GSUTIL ls "$BUCKET/$HOSTNAME_TAG/" 2>/dev/null || die "nessun backup"
@@ -1393,6 +1423,7 @@ confsync — backup/restore cifrato delle config OS
   confsync restore --quick [--yes]   core + secrets + inventario dev, solo curl/tar/gzip/openssl
   confsync quick-list                lista file del core (path relativi a HOME)
   confsync ui [--port N] [--no-open] console web locale su 127.0.0.1
+  confsync agent-config [--push] [--dry-run]   pubblica la config agenti generale (git)
   confsync list
   confsync diff
 EOF
@@ -1407,8 +1438,9 @@ main() {
     diff)    shift; cmd_diff "$@" ;;
     quick-list) shift; cmd_quick_list "$@" ;;
     ui)      shift; cmd_ui "$@" ;;
+    agent-config) shift; cmd_agent_config "$@" ;;
     ""|-h|--help) usage ;;
-    *) die "comando sconosciuto: $1 (usa: backup|restore|list|diff|quick-list|ui)" ;;
+    *) die "comando sconosciuto: $1 (usa: backup|restore|list|diff|quick-list|ui|agent-config)" ;;
   esac
 }
 
